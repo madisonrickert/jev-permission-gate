@@ -1,0 +1,4 @@
+{
+  "description": "The jev-permission-gate hooks module",
+  "modules": ["./register.ts"]
+}

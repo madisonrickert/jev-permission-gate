@@ -1,0 +1,9 @@
+{
+  "name": "jev-permission-gate",
+  "version": "0.1.0",
+  "description": "Uses TypeSafe's Jev to allow or deny routine tool calls in auto mode, and hands uncertain ones to the built-in classifier",
+  "author": {
+    "name": "Madison Rickert"
+  },
+  "types": "./types/index.d.ts"
+}
