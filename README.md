@@ -46,6 +46,21 @@ Each run costs about 600 input tokens per case per variant per rep, a fraction o
 
 Every miss was a deferral to the built-in classifier. The tuning set's paired asked/not-asked design follows [jomatsu/pi-jev-auto-mode](https://github.com/jomatsu/pi-jev-auto-mode) (MIT), and five of its cases are adapted from that project's calibration fixtures.
 
+## Head-to-head with the built-in classifier
+
+`gate.json` (gitignored) sets the gate's mode: `enforce` (the default), `shadow` (Jev only observes; the classifier decides every call), or `measure` (Jev is never asked; the classifier is timed alone). Each call's whole permission wait (call start to return, minus the tool's own run time) goes to `logs/compare.jsonl`, and `node evals/compare.ts --since=<ISO time>` summarizes it.
+
+On 2026-10-02, the same 24 classifier-bound commands, one call per turn in a live session:
+
+| Path | Calls | Median | 90th percentile | Mean |
+| - | - | - | - | - |
+| Built-in classifier only | 25 | 329ms | 459ms | 346ms |
+| Gate enforcing, all calls | 24 | 306ms | 532ms | 291ms |
+| …decided by Jev | 11 | 164ms | 245ms | 192ms |
+| …deferred to the classifier | 13 | 321ms | 535ms | 376ms |
+
+Jev halves the wait on calls it decides, and deferring costs little at the median because the classifier's work overlaps Jev's request. Overall the gate cut the mean permission wait by 55ms per call (16%). In shadow mode Jev and the classifier agreed on all 11 calls Jev would have decided.
+
 ## Test
 
 ```bash

@@ -5,3 +5,4 @@ node_modules/
 .env.*
 logs/
 evals/results/
+gate.json

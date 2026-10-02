@@ -25,30 +25,76 @@ type Outcome = 'allowed' | 'denied' | 'deferred' | 'skipped' | 'error' | 'passth
 type LogEntry = { outcome: Outcome | 'received'; tool: string; summary: string; reason: string; ms?: number }
 
 // Every decision also goes to logs/decisions.jsonl beside the manifest, so an
-// eval can read what happened without asking anyone to run /jev-gate. Mods
-// have no append, so we hold the tail in memory and rewrite the file, one
+// eval can read what happened without asking anyone to run /jev-gate, and each
+// call the built-in classifier decided goes to logs/compare.jsonl. Mods have no
+// append, so each journal holds its tail in memory and rewrites the file, one
 // write at a time and never in the tool call's path.
 const LOG_LIMIT = 1000
-let journal: string[] | undefined
-let journalWrite: Promise<void> = Promise.resolve()
 
-function journalAppend($: EngineInterface, entry: LogEntry) {
-  const line = JSON.stringify({ at: new Date().toISOString(), mode: permissionMode ?? null, peers: peerRequests.length, ...entry })
-  const path = `${$.plugin.root}/logs/decisions.jsonl`
-  journalWrite = journalWrite
+type JournalFile = 'decisions.jsonl' | 'compare.jsonl'
+const journals = new Map<JournalFile, { lines?: string[]; writing: Promise<void> }>()
+
+function appendJournal($: EngineInterface, file: JournalFile, row: Record<string, unknown>) {
+  const journal = journals.get(file) ?? { writing: Promise.resolve() }
+  journals.set(file, journal)
+  const line = JSON.stringify({ at: new Date().toISOString(), ...row })
+  const path = `${$.plugin.root}/logs/${file}`
+  journal.writing = journal.writing
     .then(async () => {
-      if (!journal) {
-        // First write since this module loaded: keep what an earlier load wrote.
-        journal = (await $.fs.exists(path)) ? (await $.fs.read(path)).split('\n').filter(Boolean) : []
-      }
-      journal.push(line)
-      if (journal.length > LOG_LIMIT) journal.splice(0, journal.length - LOG_LIMIT)
-      await $.fs.write(path, journal.join('\n') + '\n')
+      // First write since this module loaded: keep what an earlier load wrote.
+      journal.lines ??= (await $.fs.exists(path)) ? (await $.fs.read(path)).split('\n').filter(Boolean) : []
+      journal.lines.push(line)
+      if (journal.lines.length > LOG_LIMIT) journal.lines.splice(0, journal.lines.length - LOG_LIMIT)
+      await $.fs.write(path, journal.lines.join('\n') + '\n')
     })
     .catch(() => {
       // Logging must never affect a permission decision.
     })
 }
+
+function journalAppend($: EngineInterface, entry: LogEntry) {
+  appendJournal($, 'decisions.jsonl', { mode: permissionMode ?? null, peers: peerRequests.length, gate: gateMode, ...entry })
+}
+
+// `enforce` (the default) acts on Jev's verdicts. `shadow` asks Jev about
+// every eligible call, blocklisted ones included, logs what it would have
+// done, and always hands the call to the built-in classifier, so the two can
+// be compared on the same calls. `measure` never asks Jev and only times the
+// built-in classifier, so Jev's own request can't overlap with it. Set it with {"mode": "shadow"} in gate.json
+// beside the manifest; the file is re-read every few seconds.
+type GateMode = 'enforce' | 'shadow' | 'measure'
+let gateMode: GateMode = 'enforce'
+let gateModeReadAt = -Infinity
+
+async function loadGateMode($: EngineInterface): Promise<GateMode> {
+  const now = await $.clock.now()
+  if (now - gateModeReadAt < 5000) return gateMode
+  gateModeReadAt = now
+  try {
+    const parsed = JSON.parse(await $.fs.read(`${$.plugin.root}/gate.json`)) as { mode?: unknown }
+    gateMode = parsed.mode === 'shadow' || parsed.mode === 'measure' ? parsed.mode : 'enforce'
+  } catch {
+    gateMode = 'enforce'
+  }
+  return gateMode
+}
+
+// Calls handed to the built-in classifier, by tool_use_id, so tool.call can
+// time the classifier once the call returns. There is no event between the
+// classifier's verdict and the tool starting, so its time is the span from
+// the hand-off to the call's return, minus the tool's own run time, which
+// PostToolUse reports.
+type Handoff = {
+  tool: string
+  summary: string
+  handedOffAt: number
+  jev?: { decision: Verdict['decision']; ms: number; reason: string; blocklisted?: string }
+  skippedBecause?: string
+}
+const handoffs = new Map<string, Handoff>()
+const runTimes = new Map<string, number>()
+// Calls Jev decided itself in enforce mode, for the end-to-end comparison.
+const jevDecided = new Map<string, { tool: string; summary: string; jev: NonNullable<Handoff['jev']> }>()
 
 const config: GateConfig = { ...DEFAULT_CONFIG }
 
@@ -166,8 +212,49 @@ export const register: Register = (on) => {
   })
 
   on('classic.PostToolUse', async ($, e, next) => {
+    if ((handoffs.has(e.tool_use_id) || jevDecided.has(e.tool_use_id)) && e.duration_ms !== undefined) {
+      runTimes.set(e.tool_use_id, e.duration_ms)
+    }
     await rememberMode($, e.permission_mode)
     return next(e)
+  })
+
+  on('tool.call', async ($, e, next) => {
+    // permission_ms: the whole wait from the call starting to it returning,
+    // minus the tool's own run time. The same measure in every gate mode, so
+    // runs in `measure` and `enforce` compare end to end.
+    const calledAt = await $.clock.now()
+    const result = await next(e)
+    const handoff = handoffs.get(e.tool_use_id)
+    const decidedByJev = jevDecided.get(e.tool_use_id)
+    if (!handoff && !decidedByJev) return result
+    handoffs.delete(e.tool_use_id)
+    jevDecided.delete(e.tool_use_id)
+    const returnedAt = await $.clock.now()
+    const runMs = runTimes.get(e.tool_use_id)
+    runTimes.delete(e.tool_use_id)
+    const denied = result.deny !== undefined
+    const permissionMs = returnedAt - calledAt - (runMs ?? 0)
+    appendJournal($, 'compare.jsonl', {
+      gate: gateMode,
+      tool: e.tool,
+      summary: (handoff ?? decidedByJev)!.summary,
+      jev: handoff?.jev ?? decidedByJev?.jev ?? null,
+      skipped: handoff?.skippedBecause ?? null,
+      // Who settled the call: Jev on its own, or the built-in classifier.
+      decider: decidedByJev ? 'jev' : handoff?.skippedBecause?.startsWith('control') ? 'engine' : 'classifier',
+      classifier: handoff
+        ? {
+            decision: denied ? 'deny' : 'allow',
+            // Without a run time (a denial, or no PostToolUse), the span is all classifier.
+            ms: returnedAt - handoff.handedOffAt - (runMs ?? 0),
+            reason: denied ? String(result.deny).slice(0, 200) : null,
+          }
+        : null,
+      permission_ms: permissionMs,
+      run_ms: runMs ?? null,
+    })
+    return result
   })
 
   on('tool.check', async ($, e, next) => {
@@ -177,19 +264,37 @@ export const register: Register = (on) => {
     permissionMode = (await read($, modeAtom)) ?? undefined
     peerRequests = await read($, peersAtom)
     const summary = JSON.stringify(e.input ?? {}).slice(0, 120)
+    const mode = await loadGateMode($)
+    const handOff = async (h: Omit<Handoff, 'handedOffAt' | 'tool' | 'summary'>) => {
+      handoffs.set(e.tool_use_id!, { tool: e.tool, summary, handedOffAt: await $.clock.now(), ...h })
+      return decided
+    }
     if (decided.decision !== 'ask' || permissionMode !== 'auto' || !e.tool_use_id) {
       if (e.tool_use_id) {
         const why = decided.decision !== 'ask' ? `engine already decided ${decided.decision}` : `mode ${permissionMode ?? 'unknown'}`
         record($, { outcome: 'passthrough', tool: e.tool, summary, reason: why })
+        // Control rows: the same timing on calls no classifier sees, which
+        // gives the overhead floor the classifier's figures include.
+        if (mode !== 'enforce' && decided.decision === 'allow' && permissionMode === 'auto') {
+          return handOff({ skippedBecause: 'control: engine allowed without the classifier' })
+        }
       }
       return decided
     }
 
-    const gate = prefilter(e.tool, e.input, config)
-    if (!gate.ok) {
-      record($, { outcome: 'skipped', tool: e.tool, summary, reason: gate.reason })
-      return decided
+    if (mode === 'measure') {
+      record($, { outcome: 'skipped', tool: e.tool, summary, reason: 'measure mode: classifier only' })
+      return handOff({ skippedBecause: 'measure mode' })
     }
+    const shadow = mode === 'shadow'
+
+    const gate = prefilter(e.tool, e.input, config)
+    if (!gate.ok && !(shadow && config.tools.includes(e.tool))) {
+      record($, { outcome: 'skipped', tool: e.tool, summary, reason: gate.reason })
+      return handOff({ skippedBecause: gate.reason })
+    }
+    const action = gate.ok ? gate.action : { tool: e.tool, input: e.input as JsonValue }
+    const blocklisted = gate.ok ? undefined : gate.reason
 
     const apiKey = await loadApiKey($)
     if (!apiKey) {
@@ -198,19 +303,21 @@ export const register: Register = (on) => {
         $.ui.log('jev-permission-gate: no TYPESAFE_API_KEY in the environment or the mod\'s .env, so every call goes to the built-in classifier')
       }
       record($, { outcome: 'skipped', tool: e.tool, summary, reason: 'no TYPESAFE_API_KEY' })
-      return decided
+      return handOff({ skippedBecause: 'no TYPESAFE_API_KEY' })
     }
     const model = (await $.env.get('TYPESAFE_DEFAULT_MODEL')) || config.model
 
     const messages = await $.session.messages()
     const userRequests = messages.filter((m) => m.role === 'user' && m.text.trim()).map((m) => m.text)
     const cwd = await $.session.cwd()
-    const state = buildState(userRequests, gate.action, cwd, peerRequests)
+    const state = buildState(userRequests, action, cwd, peerRequests)
 
+    // Shadow mode skips the cache so every comparison times a real request.
     const cacheKey = JSON.stringify(state)
-    const cached = cache.get(cacheKey)
+    const cached = shadow ? undefined : cache.get(cacheKey)
     if (cached) {
       record($, { outcome: OUTCOME[cached.decision], tool: e.tool, summary, reason: `cached: ${cached.reason}`, ms: 0 })
+      if (cached.decision === 'defer') return handOff({ jev: { decision: 'defer', ms: 0, reason: `cached: ${cached.reason}` } })
       return answer(cached, `${model} (cached)`, decided)
     }
 
@@ -220,22 +327,27 @@ export const register: Register = (on) => {
       const ms = (await $.clock.now()) - started
       if (result === 'timeout') {
         record($, { outcome: 'error', tool: e.tool, summary, reason: `timed out after ${config.timeoutMs}ms`, ms })
-        return decided
+        return handOff({ skippedBecause: `Jev timed out after ${config.timeoutMs}ms` })
       }
       const verdict = decide(result.answers, config)
-      remember(cacheKey, verdict)
-      record($, { outcome: OUTCOME[verdict.decision], tool: e.tool, summary, reason: verdict.reason, ms })
+      if (!shadow) remember(cacheKey, verdict)
+      const reason = blocklisted ? `${verdict.reason} [blocklisted: ${blocklisted}]` : verdict.reason
+      record($, { outcome: shadow ? 'deferred' : OUTCOME[verdict.decision], tool: e.tool, summary, reason: shadow ? `shadow, Jev would ${verdict.decision}: ${reason}` : reason, ms })
+      if (shadow || verdict.decision === 'defer') {
+        return handOff({ jev: { decision: blocklisted ? 'defer' : verdict.decision, ms, reason, blocklisted } })
+      }
+      jevDecided.set(e.tool_use_id, { tool: e.tool, summary, jev: { decision: verdict.decision, ms, reason } })
       return answer(verdict, result.model, decided)
     } catch (err) {
       const ms = (await $.clock.now()) - started
       record($, { outcome: 'error', tool: e.tool, summary, reason: String((err as Error)?.message ?? err), ms })
-      return decided
+      return handOff({ skippedBecause: 'Jev error' })
     }
   })
 
   on('command.run', { command: 'jev-gate' }, async () => {
     const lines = [
-      `mode: ${permissionMode ?? 'unknown (gate idle until the first prompt)'}`,
+      `mode: ${permissionMode ?? 'unknown (gate idle until the first prompt)'} · gate: ${gateMode}`,
       `allowed ${counts.allowed} · denied ${counts.denied} · deferred ${counts.deferred} · skipped ${counts.skipped} · errors ${counts.error} · passed through ${counts.passthrough}`,
       `Jev latency p50 ${percentile(latencies, 50)}ms · p95 ${percentile(latencies, 95)}ms`,
       ...recent
