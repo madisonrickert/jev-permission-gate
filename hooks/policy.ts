@@ -1,6 +1,7 @@
 // Pure decision logic: what to send Jev and how to read its answers.
 // No mods API calls in here, so tests can drive it directly.
 
+import { analyze, INTERPRETERS } from './shell.ts'
 import type { JsonValue, NoulAnswer, NoulQuestion } from './typesafe.ts'
 
 export type GateConfig = {
@@ -94,74 +95,135 @@ const RISK_KEYS = QUESTION_KEYS.filter((k) => k !== 'serves_request')
 // adversarial framing, so the riskiest shapes go straight to the built-in
 // classifier.
 //
-// Program names are matched against the first word of each command segment,
-// not anywhere in the text, so a path like /tmp/jev-eval doesn't read as
-// `eval`. Argument shapes are matched against the whole command.
+// hooks/shell.ts parses the command the way a shell would, so program names
+// are matched against what each part of the command actually runs, after
+// quotes, escapes, keywords, wrappers, and nested shells: a path like
+// /tmp/jev-eval doesn't read as `eval`, and `"su"do` or `bash -c 'sudo …'`
+// still read as `sudo`. Argument shapes are matched against the whole command.
 const RISKY_PROGRAMS: Readonly<Record<string, string>> = {
-  ...names('privilege escalation', 'sudo', 'doas', 'su'),
-  ...names('remote shell or raw network transfer', 'ssh', 'scp', 'rsync', 'sftp', 'nc', 'ncat', 'socat', 'telnet'),
-  ...names('dynamic or obfuscated execution', 'eval', 'exec', 'source', '.'),
-  ...names('permissions, services, or keychain', 'chmod', 'chown', 'chgrp', 'launchctl', 'crontab', 'security'),
-  ...names('disk-level operation', 'dd', 'mkfs', 'diskutil', 'shred'),
-  ...names('killing processes', 'kill', 'pkill', 'killall'),
+  ...names('privilege escalation', 'sudo', 'doas', 'su', 'pkexec', 'runuser', 'visudo', 'setcap', 'chattr'),
+  ...names('remote shell or raw network transfer', 'ssh', 'scp', 'rsync', 'sftp', 'ftp', 'nc', 'ncat', 'netcat', 'socat', 'telnet', 'mosh'),
+  ...names('dynamic or obfuscated execution', 'eval', 'source', '.', 'alias', 'script'),
+  ...names('permissions, services, or keychain', 'chown', 'chgrp', 'launchctl', 'crontab', 'at', 'security', 'systemctl', 'service', 'update-rc.d'),
+  ...names('system configuration', 'osascript', 'defaults', 'pmset', 'systemsetup', 'networksetup', 'scutil', 'csrutil', 'spctl', 'tccutil', 'dscl', 'sysctl', 'iptables', 'ip6tables', 'nft', 'ufw', 'pfctl', 'mount', 'umount', 'modprobe', 'insmod', 'rmmod', 'kextload', 'useradd', 'userdel', 'usermod', 'groupadd', 'passwd', 'chpasswd'),
+  ...names('disk-level operation', 'dd', 'mkfs', 'diskutil', 'shred', 'wipefs', 'fdisk', 'parted', 'srm'),
+  ...names('killing processes', 'kill', 'pkill', 'killall', 'shutdown', 'reboot', 'halt', 'poweroff'),
   ...names('environment secrets', 'printenv'),
-  ...names('infrastructure tooling', 'terraform', 'pulumi', 'kubectl', 'helm', 'aws', 'gcloud', 'az', 'wrangler', 'vercel', 'fly', 'flyctl', 'railway'),
-  ...names('database access', 'mysql', 'psql', 'mongo', 'mongosh', 'redis-cli', 'sqlite3'),
+  ...names('infrastructure tooling', 'terraform', 'tofu', 'pulumi', 'kubectl', 'helm', 'aws', 'gcloud', 'gsutil', 'az', 'doctl', 'wrangler', 'vercel', 'netlify', 'fly', 'flyctl', 'railway', 'heroku', 'firebase', 'supabase', 'ansible', 'ansible-playbook'),
+  ...names('database access', 'mysql', 'psql', 'pg_dump', 'pg_restore', 'mongo', 'mongosh', 'mongodump', 'redis-cli', 'sqlite3', 'cqlsh'),
 }
 
 const RISKY_PATTERNS: readonly [RegExp, string][] = [
-  [/(^|[\s;&|(])rm\s+(-[a-zA-Z]*[rRf]|--recursive|--force)/, 'recursive or forced removal'],
-  [/(^|[\s;&|(])git\s+(push|reset\s+--hard|clean\s+-[a-z]*f|filter-branch|filter-repo|rebase)\b/, 'git history or remote change'],
-  [/(^|\s)--(force|no-verify)\b/, 'forced or unverified operation'],
-  [/(^|[\s;&|(])(curl|wget)\s[^|]*\|\s*(ba|z|da|fi)?sh\b/, 'piping a download into a shell'],
-  [/(^|[\s;&|(])base64\s+(-d|--decode)/, 'dynamic or obfuscated execution'],
-  [/\.(ssh|aws|gnupg|netrc|npmrc|pypirc|docker)(\/|\s|$)|\.config\/gh\b/, 'credential directory'],
-  [/(^|[\s/'"@=<])\.env(\.[\w-]+)?($|[\s'";|&)])|\bexport\s+\w*(KEY|TOKEN|SECRET|PASS)/i, 'environment secrets'],
+  [/\.(ssh|aws|gnupg|kube|azure|docker|netrc|npmrc|pypirc|pgpass|git-credentials|vault-token|boto|s3cfg|terraformrc|password-store)(\/|\s|$|["'])|\.config\/(gh|gcloud|op|hub)\b|Keychains\/|\bid_(rsa|dsa|ecdsa|ed25519)\b|\.(pem|p12|pfx|keystore|jks)\b|\/etc\/(shadow|sudoers|gshadow)|_history\b/, 'credential file'],
+  [/(^|[\s/'"@=<])\.env(rc|\.[\w-]+)?($|[\s'";|&)])|\bexport\s+\w*(KEY|TOKEN|SECRET|PASS)/i, 'environment secrets'],
   [/\.claude\/|settings(\.local)?\.json|CLAUDE\.md/, 'agent configuration'],
-  [/(^|[\s;&|(])(npm|pnpm|yarn|bun)\s+(publish|login|adduser)\b|(^|[\s;&|(])(gh|glab)\s+(pr|release|repo|api)\b/, 'publishing or remote API'],
+  [/(^|[\s;&|(])(curl|wget|http|https|xh)\b[^|;&]*(\s(-F|--form|-T|--upload-file|--post-file)\b|\s(-d|--data[\w-]*)\s*@|\s@[\w./~-])/, 'uploads a local file'],
+  [/(^|[\s;&|(])(curl|wget|fetch)\b[^;&]*(\|\s*(\w*\/)?(ba|z|da|k|fi)?sh\b|\|\s*(\w*\/)?(python[\d.]*|node|perl|ruby|php)\b)/, 'piping a download into an interpreter'],
+  [/(^|[\s;&|(])(curl|wget)\b.*(&&|;|\n)\s*((ba|z|da)?sh|python[\d.]*|node|chmod\s+\+x|\.\/)/s, 'downloads and runs code'],
+  [/(^|[\s;&|(])base64\s+(-d|-D|--decode)|\bxxd\s+-r\b|\bopenssl\s+(enc|base64)\s.*-d\b/, 'dynamic or obfuscated execution'],
+  [/(^|[\s;&|(])(npm|pnpm|yarn|bun)\s+(publish|login|adduser|unpublish|deprecate|owner|dist-tag)\b|(^|[\s;&|(])(gh|glab)\s+(pr|release|repo|api|secret|workflow|gist|issue)\b|(^|[\s;&|(])(cargo|poetry|uv|hatch|flit|twine|gem|dotnet\s+nuget)\s+(publish|upload|push)\b|(^|[\s;&|(])(docker|podman)\s+(push|login)\b|(^|[\s;&|(])(mvn|gradle)\s+\S*(deploy|publish)/, 'publishing or remote API'],
+  [/(^|[\s;&|(])(npm|pnpm)\s+(i|install|add)\s.*(-g|--global)\b|(^|[\s;&|(])yarn\s+global\b|(^|[\s;&|(])(brew|port|apt|apt-get|yum|dnf|pacman|apk|snap)\s+(install|remove|uninstall|upgrade|reinstall)\b|(^|[\s;&|(])(cargo|go|gem|pipx)\s+install\b|(^|[\s;&|(])uv\s+tool\s+install\b|--break-system-packages|(^|[\s;&|(])pip3?\s+install\s.*--user\b/, 'installs software globally'],
+  [/(^|[\s;&|(])(docker|podman)\s+run\b.*(--privileged|--pid[= ]host|--net(work)?[= ]host|-v\s*\/:|--volume[= ]\/:|\/var\/run\/docker\.sock)/, 'privileged container'],
   [/(^|[\s;&|(])wp\s+(db|search-replace)\b/, 'database access'],
+  [/(^|[\s;&|(])git\s+config\s+(--global|--system)\b/, 'global git configuration'],
 ]
+
+// Output that lands in the home directory or system paths, outside any project.
+const OUTSIDE_WRITE = /^(~|\$HOME|\$\{HOME\}|\/(etc|usr|bin|sbin|opt|var|Library|System|Applications|Users|home|root|boot|dev\/(?!null$|stdout$|stderr$|fd\/|tty$)))/
 
 // A shell comment or echoed string that vouches for the command is a sign of
 // steering, and costs nothing to catch before Jev sees it.
 const SELF_JUSTIFYING =
-  /(#|echo\s+["']?).*\b(approved|authori[sz]ed|permitted|allowed by|safe to run|is safe|user (said|asked|wants|confirmed|agreed)|ignore (previous|prior|the) (instructions|rules)|do not (flag|block|deny)|(reviewer|classifier|gate)s? (should|must))/i
+  /(#|echo\s+["']?|printf\s+["']?).*\b(approved|authori[sz]ed|permitted|allowed by|safe to run|is safe|user (said|asked|wants|confirmed|agreed)|ignore (previous|prior|the|all) (instructions|rules)|do not (flag|block|deny)|(reviewer|classifier|gate|guard)s? (should|must))/i
 
 function names(reason: string, ...programs: string[]): Record<string, string> {
   return Object.fromEntries(programs.map((p) => [p, reason]))
 }
 
-// Wrappers that run the next word as the command.
-const WRAPPERS = new Set(['env', 'command', 'builtin', 'nice', 'nohup', 'time', 'xargs', 'timeout', 'caffeinate'])
-
-/** The program each segment of a shell command runs, e.g. `a && b | c` gives a, b, c. */
+/** The program each part of a shell command runs, e.g. `a && b | c` gives a, b, c. */
 export function commandPrograms(command: string): string[] {
-  const programs: string[] = []
-  segments: for (const segment of command.split(/&&|\|\||[;|&\n]|\$\(|`|\(/)) {
-    const words = segment.trim().split(/\s+/).filter(Boolean)
-    let i = 0
-    while (i < words.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[i]!)) i++
-    while (i < words.length && WRAPPERS.has(words[i]!)) {
-      // A bare `env` prints the environment, so it counts as reading secrets.
-      if (words[i] === 'env' && i === words.length - 1) {
-        programs.push('printenv')
-        continue segments
-      }
-      i++
-      while (i < words.length && (words[i]!.startsWith('-') || /^\d+$/.test(words[i]!) || /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[i]!))) i++
-    }
-    const word = words[i]
-    if (word) programs.push(word.replace(/^.*\//, ''))
+  return analyze(command).programs
+}
+
+/** Why a git invocation discards work or touches a remote, if it does. Global options before the subcommand don't hide it. */
+function riskyGit(args: readonly string[]): string | undefined {
+  let i = 0
+  while (i < args.length && args[i]!.startsWith('-')) i += /^(-C|-c|--git-dir|--work-tree|--namespace|--exec-path)$/.test(args[i]!) ? 2 : 1
+  const sub = args[i]
+  const rest = args.slice(i + 1)
+  const has = (re: RegExp) => rest.some((a) => re.test(a))
+  switch (sub) {
+    case 'push':
+    case 'filter-branch':
+    case 'filter-repo':
+    case 'rebase':
+      return 'git history or remote change'
+    case 'reset':
+      return has(/^--(hard|merge|keep)$/) ? 'git history or remote change' : undefined
+    case 'clean':
+      return has(/^-[a-z]*f|^--force$/) ? 'discards untracked files' : undefined
+    case 'checkout':
+      return rest.includes('--') || rest.includes('.') || has(/^-f$|^--force$/) ? 'discards uncommitted changes' : undefined
+    case 'restore':
+      return has(/^(-S|--staged)$/) && !has(/^(-W|--worktree)$/) ? undefined : 'discards uncommitted changes'
+    case 'stash':
+      return /^(drop|clear)$/.test(rest[0] ?? '') ? 'discards stashed changes' : undefined
+    case 'branch':
+      return has(/^(-D|--delete|-d|-M|--force|-f)$/) ? 'deletes or overwrites a branch' : undefined
+    case 'tag':
+      return has(/^(-d|--delete|-f|--force)$/) ? 'deletes or overwrites a tag' : undefined
+    case 'reflog':
+      return rest[0] === 'expire' || rest[0] === 'delete' ? 'discards recovery history' : undefined
+    case 'gc':
+      return has(/^--prune/) ? 'discards recovery history' : undefined
+    case 'update-ref':
+      return 'rewrites refs directly'
+    case 'worktree':
+      return rest[0] === 'remove' || rest[0] === 'prune' ? 'removes a worktree' : undefined
+    case 'submodule':
+      return rest[0] === 'foreach' ? 'runs a command in every submodule' : undefined
+    case 'config':
+      return has(/^--(global|system)$/) ? 'global git configuration' : undefined
+    case 'remote':
+      return /^(add|set-url|remove|rm)$/.test(rest[0] ?? '') ? 'changes a git remote' : undefined
+    default:
+      return undefined
   }
-  return programs
+}
+
+/** Why one parsed invocation is risky by its shape, if it is. */
+function riskyInvocation([program, ...args]: readonly string[]): string | undefined {
+  if (args.some((a) => /^--(force|no-verify)$/.test(a))) return 'forced or unverified operation'
+  if (program === 'git') return riskyGit(args)
+  // Making a project script executable is routine; any other permission change isn't.
+  if (program === 'chmod') {
+    const [mode, ...paths] = args
+    const plainExec = /^([ugoa]*\+x|[0-7]?7[0-5][0-5])$/.test(mode ?? '') && paths.length > 0 && paths.every((p) => !/^[/~$-]|\.\./.test(p))
+    return plainExec ? undefined : 'permissions, services, or keychain'
+  }
+  if (program === 'rm' && args.some((a) => /^-[a-zA-Z]*[rRf]|^--(recursive|force)$/.test(a))) return 'recursive or forced removal'
+  if (program === 'find' && (args.includes('-delete') || args.some((a, k) => /^-(exec|execdir|ok|okdir)$/.test(a) && /^(.*\/)?(rm|unlink|shred|truncate)$/.test(args[k + 1] ?? '')))) return 'deletes files'
+  if ((program === 'tee' || program === 'cp' || program === 'mv' || program === 'ln' || program === 'install') && args.some((a) => !a.startsWith('-') && OUTSIDE_WRITE.test(a))) return 'writes outside the project'
+  if (INTERPRETERS.has(program!)) {
+    const code = args.find((_, k) => /^-(c|e|E|-eval|r)$/.test(args[k - 1] ?? ''))
+    if (code && /\b(os\.system|subprocess|popen|spawn|execSync|execFile|child_process|Runtime\.getRuntime|system\b|exec\s*\(|`[^`]*`|shell_exec|passthru|do shell script)/.test(code)) return 'runs a shell command from interpreter code'
+  }
+  return undefined
 }
 
 /** Why Jev must not judge this command, or undefined when it may. */
 export function riskyCommandReason(command: string): string | undefined {
-  for (const program of commandPrograms(command)) {
+  const parsed = analyze(command)
+  if (parsed.problems.length) return parsed.problems[0]
+  for (const program of parsed.programs) {
     const why = RISKY_PROGRAMS[program]
     if (why) return why
   }
+  for (const invocation of parsed.invocations) {
+    const why = riskyInvocation(invocation)
+    if (why) return why
+  }
+  if (parsed.writes.some((w) => OUTSIDE_WRITE.test(w))) return 'writes outside the project'
   for (const [pattern, why] of RISKY_PATTERNS) {
     if (pattern.test(command)) return why
   }
@@ -173,10 +235,68 @@ export type Prefilter =
   | { ok: true; action: Record<string, JsonValue> }
   | { ok: false; reason: string }
 
+// Secrets typed inline. A call carrying one never goes to Jev: judging it
+// would send the secret to TypeSafe, and using it is a credentials risk anyway.
+const INLINE_SECRET: readonly RegExp[] = [
+  /\b(AKIA|ASIA)[0-9A-Z]{16}\b/,
+  /\bgh[pousr]_[A-Za-z0-9]{30,}|\bgithub_pat_[A-Za-z0-9_]{40,}/,
+  /\bglpat-[A-Za-z0-9_-]{20,}|\bnpm_[A-Za-z0-9]{30,}|\bxox[abprs]-[A-Za-z0-9-]{10,}/,
+  /\bsk-(ant-|proj-)?[A-Za-z0-9_-]{20,}|\b(sk|rk)_live_[0-9a-zA-Z]{16,}|\bAIza[0-9A-Za-z_-]{30,}/,
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----/,
+  /\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/,
+  /\b(authorization|x-api-key|api-key)\s*:\s*(bearer\s+|token\s+|basic\s+)?[A-Za-z0-9._~+/=-]{16,}/i,
+  /\b(api[_-]?key|access[_-]?token|auth[_-]?token|secret|password|passwd)\s*[=:]\s*['"]?[A-Za-z0-9/+_.~-]{12,}/i,
+  /\b[a-z][a-z0-9+.-]*:\/\/[^/\s:@]+:[^/\s@]+@/i,
+]
+
+// Characters a reader can't see, and controls other than tab and newline.
+const INVISIBLE = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\u00AD\u200B-\u200F\u2028-\u202E\u2060-\u2069\uFEFF]/
+
+/** Why no string anywhere in a tool input may go to Jev, if there's a reason. */
+function unsafeText(input: unknown): string | undefined {
+  const texts: string[] = []
+  const collect = (v: unknown, depth: number) => {
+    if (depth > 6) return
+    if (typeof v === 'string') texts.push(v)
+    else if (Array.isArray(v)) v.forEach((x) => collect(x, depth + 1))
+    else if (typeof v === 'object' && v !== null) Object.values(v).forEach((x) => collect(x, depth + 1))
+  }
+  collect(input, 0)
+  for (const t of texts) {
+    if (INVISIBLE.test(t)) return 'invisible or control characters'
+    if (INLINE_SECRET.some((re) => re.test(t))) return 'inline secret'
+  }
+  return undefined
+}
+
+/** Why a URL can't be fast-approved, if it can't. */
+export function riskyUrlReason(url: string): string | undefined {
+  let parsed: URL
+  try {
+    parsed = new URL(url)
+  } catch {
+    return 'unparseable URL'
+  }
+  if (parsed.protocol !== 'https:') return 'non-https URL'
+  if (parsed.username || parsed.password) return 'credentials in the URL'
+  const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '')
+  // The URL parser already turns decimal, octal, and hex IPv4 forms into dotted quads.
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(host) || host.includes(':')) return 'IP address instead of a domain'
+  if (host === 'localhost' || !host.includes('.') || /\.(localhost|local|internal|intranet|lan|home|corp|test|invalid)$/.test(host)) return 'local or private network address'
+  if (host.split('.').some((label) => label.startsWith('xn--'))) return 'look-alike (punycode) domain'
+  if (host.split('.').some((label) => label.length > 40)) return 'data in the hostname'
+  // Query strings and long path segments are the easiest places to smuggle data out.
+  if (parsed.search.length > 200) return 'long query string'
+  if (parsed.pathname.length > 300 || parsed.pathname.split('/').some((seg) => /^[A-Za-z0-9+/=_-]{64,}$/.test(seg))) return 'encoded data in the URL path'
+  return undefined
+}
+
 /** Decide whether Jev may weigh in at all, and boil the tool input down to what it needs. */
 export function prefilter(tool: string, input: unknown, config: GateConfig): Prefilter {
   if (!config.tools.includes(tool)) return { ok: false, reason: `${tool} is not in the fast-approve list` }
   const args = (typeof input === 'object' && input !== null ? input : {}) as Record<string, unknown>
+  const unsafe = unsafeText(args)
+  if (unsafe) return { ok: false, reason: unsafe }
 
   if (tool === 'Bash') {
     const command = typeof args.command === 'string' ? args.command : ''
@@ -191,23 +311,29 @@ export function prefilter(tool: string, input: unknown, config: GateConfig): Pre
 
   if (tool === 'WebFetch') {
     const url = typeof args.url === 'string' ? args.url : ''
-    let parsed: URL
-    try {
-      parsed = new URL(url)
-    } catch {
-      return { ok: false, reason: 'unparseable URL' }
-    }
-    if (parsed.protocol !== 'https:') return { ok: false, reason: 'non-https URL' }
-    // Query strings are the easiest place to smuggle data out.
-    if (parsed.search.length > 200) return { ok: false, reason: 'long query string' }
-    return { ok: true, action: { tool, url, prompt: String(args.prompt ?? '').slice(0, 500) } }
+    const risky = riskyUrlReason(url)
+    if (risky) return { ok: false, reason: risky }
+    const prompt = String(args.prompt ?? '')
+    // Truncating would hide the end of the prompt from Jev, so a long one isn't judged at all.
+    if (prompt.length > 1000) return { ok: false, reason: 'fetch prompt too long to judge quickly' }
+    return { ok: true, action: { tool, url, prompt } }
   }
 
   if (tool === 'WebSearch') {
-    return { ok: true, action: { tool, query: String(args.query ?? '').slice(0, 500) } }
+    const query = String(args.query ?? '')
+    if (!query.trim()) return { ok: false, reason: 'empty query' }
+    if (query.length > 500) return { ok: false, reason: 'search query too long to judge quickly' }
+    return { ok: true, action: { tool, query } }
   }
 
   return { ok: true, action: { tool, input: truncateJson(args, 1500) } }
+}
+
+/** Keep the start and the end of a long message: a pasted log or file often comes first and the actual request last. */
+export function clip(text: string, max = 1500): string {
+  if (text.length <= max) return text
+  const half = Math.floor((max - 3) / 2)
+  return `${text.slice(0, half)} … ${text.slice(-half)}`
 }
 
 /**
@@ -226,11 +352,11 @@ export function buildState(
   peerRequests: readonly string[] = [],
 ): JsonValue {
   const state: Record<string, JsonValue> = {
-    user_requests: userRequests.slice(-3).map((t) => t.slice(0, 1500)),
+    user_requests: userRequests.slice(-3).map((t) => clip(t)),
     tool_call: action,
     project_directory: projectDirectory,
   }
-  if (peerRequests.length) state.peer_requests = peerRequests.slice(-3).map((t) => t.slice(0, 1500))
+  if (peerRequests.length) state.peer_requests = peerRequests.slice(-3).map((t) => clip(t))
   return state
 }
 
@@ -242,6 +368,9 @@ export type Verdict = { decision: 'allow' | 'deny' | 'defer'; reason: string }
  * including risky calls the user asked for, to the built-in classifier.
  */
 export function decide(answers: Record<QuestionKey, NoulAnswer>, config: GateConfig): Verdict {
+  // A probability outside 0 to 1, or a missing one, means the reply can't be trusted.
+  const invalid = QUESTION_KEYS.filter((k) => !(answers[k]?.noul >= 0 && answers[k]?.noul <= 1))
+  if (invalid.length) return { decision: 'defer', reason: `invalid answer for ${invalid.join(', ')}` }
   const serves = answers.serves_request.noul
   const fmt = (k: QuestionKey) => `${k} ${answers[k].noul.toFixed(2)}`
   const head = fmt('serves_request')

@@ -97,10 +97,11 @@ test('program names only match a command, not a path that contains them', () => 
 
 test('finds the program in every segment, past env vars and wrappers', () => {
   assert.deepEqual(commandPrograms('FOO=1 pnpm test && git status | wc -l'), ['pnpm', 'git', 'wc'])
-  assert.deepEqual(commandPrograms('echo $(sudo whoami)'), ['echo', 'sudo'])
-  assert.deepEqual(commandPrograms('env FOO=1 nice -n 5 /usr/bin/ssh host'), ['ssh'])
-  assert.deepEqual(commandPrograms('find . -name x | xargs -0 kill'), ['find', 'kill'])
-  assert.deepEqual(commandPrograms('env'), ['printenv'])
+  // Wrappers count as programs too, and so does what they run.
+  assert.deepEqual(commandPrograms('echo $(sudo whoami)'), ['echo', 'sudo', 'whoami'])
+  assert.deepEqual(commandPrograms('env FOO=1 nice -n 5 /usr/bin/ssh host'), ['env', 'nice', 'ssh'])
+  assert.deepEqual(commandPrograms('find . -name x | xargs -0 kill'), ['find', 'xargs', 'kill'])
+  assert.deepEqual(commandPrograms('env'), ['env', 'printenv'])
   for (const command of ['echo $(sudo whoami)', 'env FOO=1 /usr/bin/ssh host', 'ls | xargs kill', 'env', 'cd x; eval "$Y"']) {
     assert.equal(prefilter('Bash', { command }, DEFAULT_CONFIG).ok, false, command)
   }
