@@ -61,7 +61,7 @@ Claude Code asks for the plugin's settings when you enable it:
 | Jev model | `jev-1.13.0` | Pinned to the version the thresholds were tuned on. `jev-latest` follows new releases, which can shift answers. |
 | Decision logs | off | Write every decision to `~/.claude/jev-permission-gate/logs/`. Off by default because the logs record the commands the gate sees. |
 
-Change the gate mode, model, and logging later in `/config`. Instead of the key setting, you can export `TYPESAFE_API_KEY`.
+Change the gate mode, model, and logging later in `/config`. If you installed before v0.1.2, check that the model reads `jev-1.13.0`: an older install may have saved `jev-latest`. Instead of the key setting, you can export `TYPESAFE_API_KEY`.
 
 ## Use
 
