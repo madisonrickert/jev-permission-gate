@@ -43,7 +43,14 @@ async function loadDataDir($: EngineInterface): Promise<string> {
 type JournalFile = 'decisions.jsonl' | 'compare.jsonl'
 const journals = new Map<JournalFile, { lines?: string[]; writing: Promise<void> }>()
 
+// Logs record the commands the gate sees, so they're opt-in: the
+// decision_logs setting turns them on, and shadow and measure modes, whose
+// purpose is the comparison log, always write them.
+let decisionLogs = false
+const loggingOn = () => decisionLogs || gateMode !== 'enforce'
+
 function appendJournal($: EngineInterface, file: JournalFile, row: Record<string, unknown>) {
+  if (!loggingOn()) return
   const journal = journals.get(file) ?? { writing: Promise.resolve() }
   journals.set(file, journal)
   const line = JSON.stringify({ at: new Date().toISOString(), ...row })
@@ -212,6 +219,7 @@ export const register: Register = (on, options) => {
   configuredApiKey = option('typesafe_api_key')
   configuredModel = option('model')
   configuredGateMode = asGateMode(option('gate_mode')) ?? 'enforce'
+  decisionLogs = options.decision_logs === true
   gateMode = configuredGateMode
 
   on('session.start', async ($, e, next) => {
@@ -290,7 +298,7 @@ export const register: Register = (on, options) => {
     const summary = JSON.stringify(e.input ?? {}).slice(0, 120)
     const mode = await loadGateMode($)
     const handOff = async (h: Omit<Handoff, 'handedOffAt' | 'tool' | 'summary'>) => {
-      handoffs.set(e.tool_use_id!, { tool: e.tool, summary, handedOffAt: await $.clock.now(), ...h })
+      if (loggingOn()) handoffs.set(e.tool_use_id!, { tool: e.tool, summary, handedOffAt: await $.clock.now(), ...h })
       return decided
     }
     if (decided.decision !== 'ask' || permissionMode !== 'auto' || !e.tool_use_id) {
@@ -360,7 +368,7 @@ export const register: Register = (on, options) => {
       if (shadow || verdict.decision === 'defer') {
         return handOff({ jev: { decision: blocklisted ? 'defer' : verdict.decision, ms, reason, blocklisted } })
       }
-      jevDecided.set(e.tool_use_id, { tool: e.tool, summary, jev: { decision: verdict.decision, ms, reason } })
+      if (loggingOn()) jevDecided.set(e.tool_use_id, { tool: e.tool, summary, jev: { decision: verdict.decision, ms, reason } })
       return answer(verdict, result.model, decided)
     } catch (err) {
       const ms = (await $.clock.now()) - started

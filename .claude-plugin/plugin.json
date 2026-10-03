@@ -1,6 +1,6 @@
 {
   "name": "jev-permission-gate",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Uses TypeSafe's Jev to allow or deny routine tool calls in auto mode, and hands uncertain ones to the built-in classifier",
   "author": {
     "name": "Madison Rickert"
@@ -32,6 +32,12 @@
       "title": "Jev model",
       "description": "jev-latest, or a pinned version such as jev-1.13.0.",
       "default": "jev-latest"
+    },
+    "decision_logs": {
+      "type": "boolean",
+      "title": "Decision logs",
+      "description": "Write every decision to ~/.claude/jev-permission-gate/logs/. Off by default because the logs record the commands the gate sees. Shadow and measure modes always log, since producing the comparison is their purpose.",
+      "default": false
     }
   }
 }

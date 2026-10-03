@@ -27,7 +27,9 @@ If the key is missing, TypeSafe errors, or Jev takes longer than 1.5 seconds, th
 
 ## Privacy
 
-Every call the gate judges sends your last three messages (up to 1,500 characters each), the pending command or URL, and your project path to TypeSafe's API. Read [TypeSafe's data handling](https://docs.typesafe.ai/models.md#data-handling) before using it with anything sensitive.
+Every call the gate judges sends your last three messages (up to 1,500 characters each), the pending command or URL, and your project path to TypeSafe's API. A secret typed inline in a command, such as a token in a `curl` header, goes with it. Commands that touch `.env` files, credential folders, or `export ...KEY/TOKEN/SECRET` never reach Jev, but the blocklist can't catch every inline secret. Read [TypeSafe's data handling](https://docs.typesafe.ai/models.md#data-handling) before using it with anything sensitive.
+
+The API key itself is a sensitive plugin setting: Claude Code masks it and keeps it in secure storage rather than `settings.json`. The gate sends it only to TypeSafe and never logs it.
 
 ## Requirements
 
@@ -54,14 +56,15 @@ Claude Code asks for the plugin's settings when you enable it:
 | TypeSafe API key | none | Stored in secure storage. Without it the gate stays out of the way and every call goes to the built-in classifier. |
 | Gate mode | `enforce` | `enforce` acts on Jev's verdicts. `shadow` only logs them while the built-in classifier decides. `measure` skips Jev and times the classifier. |
 | Jev model | `jev-latest` | Pin a version such as `jev-1.13.0` to keep thresholds stable across releases. |
+| Decision logs | off | Write every decision to `~/.claude/jev-permission-gate/logs/`. Off by default because the logs record the commands the gate sees. |
 
-Change the gate mode and model later in `/config`. Instead of the key setting, you can export `TYPESAFE_API_KEY`.
+Change the gate mode, model, and logging later in `/config`. Instead of the key setting, you can export `TYPESAFE_API_KEY`.
 
 ## Use
 
-The gate only acts in auto mode. Inside a session, `/jev-gate` shows counts, Jev latency, and the last 15 decisions with their reasons.
+The gate only acts in auto mode. Inside a session, `/jev-gate` shows counts, Jev latency, and the last 15 decisions with their reasons, whether or not logging is on.
 
-Logs live in `~/.claude/jev-permission-gate/logs/`, which survives plugin updates:
+With decision logs on, or in shadow or measure mode, logs go to `~/.claude/jev-permission-gate/logs/`, which survives plugin updates. Logging never delays a decision: writes happen in the background.
 
 - `decisions.jsonl`: every decision, including calls the gate passed through untouched
 - `compare.jsonl`: each call the built-in classifier decided, with its timing

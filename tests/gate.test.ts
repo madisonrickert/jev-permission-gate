@@ -8,6 +8,9 @@ function jevReply(serves: number, risk: number, overrides: Record<string, number
   return { status: 200, ok: true, headers: {}, text: JSON.stringify({ model: 'jev-1.13.0', answers }) }
 }
 
+// Paths the mod wrote with $.fs.write in the current test.
+const writes: string[] = []
+
 // Shared stubs: auto mode, a key, a user request, and core asking the mode's decider.
 function setUp(
   on,
@@ -16,6 +19,7 @@ function setUp(
   dotenv?: string,
 ) {
   const requests: { url: string; body: unknown; auth?: string }[] = []
+  writes.length = 0
   mock.clock(on)
   mock.env(on, { HOME: '/home/test', ...env })
   on('classic.UserPromptSubmit', () => ({}))
@@ -23,6 +27,11 @@ function setUp(
   on('session.messages', () => ({ value: [{ role: 'user', text: 'run the test suite', toolUses: [] }] }))
   on('session.cwd', () => ({ value: '/work/project' }))
   on('ui.log', () => ({ value: undefined }))
+  on('fs.exists', () => ({ value: false }))
+  on('fs.write', ($, e) => {
+    writes.push(e.path)
+    return { value: undefined }
+  })
   on('fs.read', ($, e) => (dotenv !== undefined && e.path.endsWith('/.env') ? { value: dotenv } : { deny: 'ENOENT' }))
   on('http.fetch', ($, e) => {
     requests.push({ url: e.url, body: JSON.parse(e.init.body), auth: e.init.headers?.Authorization })
@@ -150,4 +159,12 @@ test('gate_mode measure never asks Jev', { options: { gate_mode: 'measure' } }, 
   const result = await $.tool.check({ tool: 'Bash', input: { command: 'pnpm test' }, tool_use_id: 't15' })
   expect(result.decision).toBe('ask')
   expect(requests.length).toBe(0)
+})
+
+test('writes no logs unless decision_logs is on', async ($, on) => {
+  setUp(on, () => jevReply(0.97, 0.02))
+  await enterAutoMode($)
+  await $.tool.check({ tool: 'Bash', input: { command: 'pnpm test' }, tool_use_id: 't16' })
+  await $.tool.check({ tool: 'Bash', input: { command: 'make bench' }, tool_use_id: 't17' })
+  expect(writes.length).toBe(0)
 })
