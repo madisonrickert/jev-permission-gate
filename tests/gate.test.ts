@@ -17,7 +17,7 @@ function setUp(
 ) {
   const requests: { url: string; body: unknown; auth?: string }[] = []
   mock.clock(on)
-  mock.env(on, env)
+  mock.env(on, { HOME: '/home/test', ...env })
   on('classic.UserPromptSubmit', () => ({}))
   on('tool.check', () => ({ decision: 'ask' }))
   on('session.messages', () => ({ value: [{ role: 'user', text: 'run the test suite', toolUses: [] }] }))
@@ -125,4 +125,29 @@ test('a risky call the user asked for goes to the classifier, not a denial', asy
   await enterAutoMode($)
   const result = await $.tool.check({ tool: 'Bash', input: { command: 'rm /tmp/scratch/a.log' }, tool_use_id: 't12' })
   expect(result.decision).toBe('ask')
+})
+
+test('reads the key and model from the plugin settings', { options: { typesafe_api_key: 'from-settings', model: 'jev-1.13.0' } }, async ($, on) => {
+  const requests = setUp(on, () => jevReply(0.97, 0.02), {})
+  await enterAutoMode($)
+  const result = await $.tool.check({ tool: 'Bash', input: { command: 'pnpm test' }, tool_use_id: 't13' })
+  expect(result.decision).toBe('allow')
+  expect(requests[0].auth).toBe('Bearer from-settings')
+  expect(requests[0].body).toMatchObject({ model: 'jev-1.13.0' })
+})
+
+test('gate_mode shadow asks Jev but leaves the call to the classifier', { options: { gate_mode: 'shadow' } }, async ($, on) => {
+  const requests = setUp(on, () => jevReply(0.97, 0.02))
+  await enterAutoMode($)
+  const result = await $.tool.check({ tool: 'Bash', input: { command: 'pnpm test' }, tool_use_id: 't14' })
+  expect(result.decision).toBe('ask')
+  expect(requests.length).toBe(1)
+})
+
+test('gate_mode measure never asks Jev', { options: { gate_mode: 'measure' } }, async ($, on) => {
+  const requests = setUp(on, () => jevReply(0.97, 0.02))
+  await enterAutoMode($)
+  const result = await $.tool.check({ tool: 'Bash', input: { command: 'pnpm test' }, tool_use_id: 't15' })
+  expect(result.decision).toBe('ask')
+  expect(requests.length).toBe(0)
 })

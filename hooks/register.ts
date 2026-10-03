@@ -31,6 +31,15 @@ type LogEntry = { outcome: Outcome | 'received'; tool: string; summary: string; 
 // write at a time and never in the tool call's path.
 const LOG_LIMIT = 1000
 
+// An installed plugin runs from a cache folder that each update replaces, so
+// logs and gate.json live here instead: ~/.claude/jev-permission-gate/.
+let dataDir: string | undefined
+
+async function loadDataDir($: EngineInterface): Promise<string> {
+  dataDir ??= `${(await $.env.get('HOME')) ?? '.'}/.claude/jev-permission-gate`
+  return dataDir
+}
+
 type JournalFile = 'decisions.jsonl' | 'compare.jsonl'
 const journals = new Map<JournalFile, { lines?: string[]; writing: Promise<void> }>()
 
@@ -38,9 +47,9 @@ function appendJournal($: EngineInterface, file: JournalFile, row: Record<string
   const journal = journals.get(file) ?? { writing: Promise.resolve() }
   journals.set(file, journal)
   const line = JSON.stringify({ at: new Date().toISOString(), ...row })
-  const path = `${$.plugin.root}/logs/${file}`
   journal.writing = journal.writing
     .then(async () => {
+      const path = `${await loadDataDir($)}/logs/${file}`
       // First write since this module loaded: keep what an earlier load wrote.
       journal.lines ??= (await $.fs.exists(path)) ? (await $.fs.read(path)).split('\n').filter(Boolean) : []
       journal.lines.push(line)
@@ -56,6 +65,9 @@ function journalAppend($: EngineInterface, entry: LogEntry) {
   appendJournal($, 'decisions.jsonl', { mode: permissionMode ?? null, peers: peerRequests.length, gate: gateMode, ...entry })
 }
 
+// The mode comes from the plugin's gate_mode setting (/config), and a
+// gate.json in the data directory overrides it, which lets an eval switch
+// modes without a reload.
 // `enforce` (the default) acts on Jev's verdicts. `shadow` asks Jev about
 // every eligible call, blocklisted ones included, logs what it would have
 // done, and always hands the call to the built-in classifier, so the two can
@@ -63,6 +75,9 @@ function journalAppend($: EngineInterface, entry: LogEntry) {
 // built-in classifier, so Jev's own request can't overlap with it. Set it with {"mode": "shadow"} in gate.json
 // beside the manifest; the file is re-read every few seconds.
 type GateMode = 'enforce' | 'shadow' | 'measure'
+const GATE_MODES: readonly GateMode[] = ['enforce', 'shadow', 'measure']
+const asGateMode = (value: unknown): GateMode | undefined => GATE_MODES.find((m) => m === value)
+let configuredGateMode: GateMode = 'enforce'
 let gateMode: GateMode = 'enforce'
 let gateModeReadAt = -Infinity
 
@@ -71,10 +86,10 @@ async function loadGateMode($: EngineInterface): Promise<GateMode> {
   if (now - gateModeReadAt < 5000) return gateMode
   gateModeReadAt = now
   try {
-    const parsed = JSON.parse(await $.fs.read(`${$.plugin.root}/gate.json`)) as { mode?: unknown }
-    gateMode = parsed.mode === 'shadow' || parsed.mode === 'measure' ? parsed.mode : 'enforce'
+    const parsed = JSON.parse(await $.fs.read(`${await loadDataDir($)}/gate.json`)) as { mode?: unknown }
+    gateMode = asGateMode(parsed.mode) ?? configuredGateMode
   } catch {
-    gateMode = 'enforce'
+    gateMode = configuredGateMode
   }
   return gateMode
 }
@@ -143,14 +158,17 @@ function answer(verdict: Verdict, model: string, decided: { decision: 'allow' | 
   return decided
 }
 
-// The key comes from the environment, or else from a .env file beside the
-// mod's manifest. A found key is kept; a missing one is looked up again on
-// the next call, so adding the file later works without a reload.
+// The key comes from the plugin's typesafe_api_key setting (kept in secure
+// storage), else the environment, else a .env file beside the manifest, which
+// suits a checkout loaded with --plugin-dir. A found key is kept; a missing
+// one is looked up again on the next call.
+let configuredApiKey: string | undefined
+let configuredModel: string | undefined
 let apiKeyCache: string | undefined
 
 async function loadApiKey($: EngineInterface): Promise<string | undefined> {
   if (apiKeyCache) return apiKeyCache
-  apiKeyCache = await $.env.get('TYPESAFE_API_KEY')
+  apiKeyCache = configuredApiKey || (await $.env.get('TYPESAFE_API_KEY'))
   if (!apiKeyCache) {
     try {
       apiKeyCache = readDotenvValue(await $.fs.read(`${$.plugin.root}/.env`), 'TYPESAFE_API_KEY')
@@ -189,7 +207,13 @@ function percentile(values: readonly number[], p: number) {
   return sorted[Math.min(sorted.length - 1, Math.floor((p / 100) * sorted.length))]
 }
 
-export const register: Register = (on) => {
+export const register: Register = (on, options) => {
+  const option = (key: string) => (typeof options[key] === 'string' && (options[key] as string).trim()) || undefined
+  configuredApiKey = option('typesafe_api_key')
+  configuredModel = option('model')
+  configuredGateMode = asGateMode(option('gate_mode')) ?? 'enforce'
+  gateMode = configuredGateMode
+
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'jev-gate',
@@ -300,12 +324,12 @@ export const register: Register = (on) => {
     if (!apiKey) {
       if (!warnedNoKey) {
         warnedNoKey = true
-        $.ui.log('jev-permission-gate: no TYPESAFE_API_KEY in the environment or the mod\'s .env, so every call goes to the built-in classifier')
+        $.ui.log('jev-permission-gate: no TypeSafe API key (set it with /plugin, TYPESAFE_API_KEY, or a .env), so every call goes to the built-in classifier')
       }
       record($, { outcome: 'skipped', tool: e.tool, summary, reason: 'no TYPESAFE_API_KEY' })
       return handOff({ skippedBecause: 'no TYPESAFE_API_KEY' })
     }
-    const model = (await $.env.get('TYPESAFE_DEFAULT_MODEL')) || config.model
+    const model = configuredModel || (await $.env.get('TYPESAFE_DEFAULT_MODEL')) || config.model
 
     const messages = await $.session.messages()
     const userRequests = messages.filter((m) => m.role === 'user' && m.text.trim()).map((m) => m.text)

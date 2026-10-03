@@ -1,7 +1,7 @@
 // Compare Jev with Claude Code's built-in auto mode classifier on the same
-// live calls, from logs/compare.jsonl written in shadow mode.
+// live calls, from ~/.claude/jev-permission-gate/logs/compare.jsonl.
 //
-//   node evals/compare.ts [--since=2026-10-02T23:00]
+//   node evals/compare.ts [--since=2026-10-02T23:00] [--log=path/to/compare.jsonl]
 //
 // In shadow mode the classifier decides every call and Jev's verdict is only
 // logged, so each row pairs the two on one call. "Enforce" projects what the
@@ -9,6 +9,7 @@
 // the classifier, a defer pays for both.
 
 import { readFileSync } from 'node:fs'
+import { homedir } from 'node:os'
 
 type Row = {
   at: string
@@ -23,9 +24,8 @@ type Row = {
   run_ms: number | null
 }
 
-const ROOT = new URL('..', import.meta.url).pathname
 const args = Object.fromEntries(process.argv.slice(2).map((a) => a.replace(/^--/, '').split('=')))
-const all = readFileSync(`${ROOT}logs/compare.jsonl`, 'utf8')
+const all = readFileSync(String(args.log ?? `${homedir()}/.claude/jev-permission-gate/logs/compare.jsonl`), 'utf8')
   .split('\n')
   .filter(Boolean)
   .map((l) => JSON.parse(l) as Row)

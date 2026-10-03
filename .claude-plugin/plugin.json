@@ -8,5 +8,30 @@
   "types": "./types/index.d.ts",
   "homepage": "https://github.com/madisonrickert/jev-permission-gate",
   "repository": "https://github.com/madisonrickert/jev-permission-gate",
-  "license": "MIT"
+  "license": "MIT",
+  "userConfig": {
+    "typesafe_api_key": {
+      "type": "string",
+      "title": "TypeSafe API key",
+      "description": "From console.typesafe.ai/keys. Without a key the gate stays out of the way and every call goes to the built-in classifier.",
+      "sensitive": true
+    },
+    "gate_mode": {
+      "type": "string",
+      "title": "Gate mode",
+      "description": "enforce acts on Jev's verdicts; shadow only logs them while the built-in classifier decides; measure skips Jev and times the classifier.",
+      "options": [
+        "enforce",
+        "shadow",
+        "measure"
+      ],
+      "default": "enforce"
+    },
+    "model": {
+      "type": "string",
+      "title": "Jev model",
+      "description": "jev-latest, or a pinned version such as jev-1.13.0.",
+      "default": "jev-latest"
+    }
+  }
 }

@@ -32,19 +32,50 @@ Every call the gate judges sends your last three messages (up to 1,500 character
 ## Requirements
 
 - Claude Code 2.1.287 or later, with mods enabled for your account
-- A TypeSafe API key from [console.typesafe.ai](https://console.typesafe.ai/keys), set as `TYPESAFE_API_KEY` in your environment or as a `TYPESAFE_API_KEY=...` line in a `.env` file at the repo root (gitignored)
-- Optional: `TYPESAFE_DEFAULT_MODEL` to pin a version such as `jev-1.13.0` instead of `jev-latest`
+- A TypeSafe API key from [console.typesafe.ai](https://console.typesafe.ai/keys)
 
 Jev bills input tokens only. Each check is about 550 tokens, a small fraction of a cent.
 
+## Install
+
+From Madison Rickert's public plugin marketplace:
+
+```bash
+claude plugin marketplace add madisonrickert/claude-skills
+claude plugin install jev-permission-gate@claude-skills
+```
+
+Or from inside a session: `/plugin install jev-permission-gate --marketplace madisonrickert/claude-skills`.
+
+Claude Code asks for the plugin's settings when you enable it:
+
+| Setting | Default | What it does |
+| - | - | - |
+| TypeSafe API key | none | Stored in secure storage. Without it the gate stays out of the way and every call goes to the built-in classifier. |
+| Gate mode | `enforce` | `enforce` acts on Jev's verdicts. `shadow` only logs them while the built-in classifier decides. `measure` skips Jev and times the classifier. |
+| Jev model | `jev-latest` | Pin a version such as `jev-1.13.0` to keep thresholds stable across releases. |
+
+Change the gate mode and model later in `/config`. Instead of the key setting, you can export `TYPESAFE_API_KEY`.
+
 ## Use
+
+The gate only acts in auto mode. Inside a session, `/jev-gate` shows counts, Jev latency, and the last 15 decisions with their reasons.
+
+Logs live in `~/.claude/jev-permission-gate/logs/`, which survives plugin updates:
+
+- `decisions.jsonl`: every decision, including calls the gate passed through untouched
+- `compare.jsonl`: each call the built-in classifier decided, with its timing
+
+Each keeps its last 1,000 lines.
+
+## Develop
 
 ```bash
 git clone https://github.com/madisonrickert/jev-permission-gate.git
 claude --plugin-dir ./jev-permission-gate
 ```
 
-The gate only acts in auto mode. Inside the session, `/jev-gate` shows counts, Jev latency, and the last 15 decisions with their reasons. Every decision, including calls the gate passed through untouched, is also written to `logs/decisions.jsonl` (gitignored, last 1,000 lines).
+A checkout loaded this way can read the key from a `TYPESAFE_API_KEY=...` line in a `.env` file at the repo root (gitignored). Claude Code hot-reloads the mod when its files change.
 
 ## Tune
 
@@ -70,13 +101,9 @@ Every miss was a deferral to the built-in classifier. One person wrote the label
 
 ## Head to head with the built-in classifier
 
-A `gate.json` file at the repo root (gitignored) sets the gate's mode:
+Set the gate mode to `shadow` to compare Jev with the built-in classifier on the same calls, or `measure` to time the classifier alone. To switch modes without reloading, write `{ "mode": "shadow" }` to `~/.claude/jev-permission-gate/gate.json`, which overrides the setting and is re-read every few seconds.
 
-- `enforce`, the default: act on Jev's verdicts.
-- `shadow`: Jev only observes, and the classifier decides every call.
-- `measure`: Jev is never asked, and the classifier is timed alone.
-
-Each call's whole permission wait (call start to return, minus the tool's own run time) goes to `logs/compare.jsonl`, and `node evals/compare.ts --since=<ISO time>` summarizes it.
+Each call's whole permission wait (call start to return, minus the tool's own run time) goes to `compare.jsonl`, and `node evals/compare.ts --since=<ISO time>` summarizes it.
 
 On 2026-10-02, the same 24 classifier-bound commands, one call per turn in a live session:
 
