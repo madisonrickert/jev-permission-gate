@@ -22,7 +22,7 @@ import {
 } from './typesafe.ts'
 
 type Outcome = 'allowed' | 'denied' | 'deferred' | 'skipped' | 'error' | 'passthrough'
-type LogEntry = { outcome: Outcome | 'received'; tool: string; summary: string; reason: string; ms?: number }
+type LogEntry = { outcome: Outcome | 'received'; tool: string; summary: string; reason: string; ms?: number; model?: string }
 
 // Every decision also goes to logs/decisions.jsonl beside the manifest, so an
 // eval can read what happened without asking anyone to run /jev-gate, and each
@@ -364,7 +364,7 @@ export const register: Register = (on, options) => {
       const verdict = decide(result.answers, config)
       if (!shadow) remember(cacheKey, verdict)
       const reason = blocklisted ? `${verdict.reason} [blocklisted: ${blocklisted}]` : verdict.reason
-      record($, { outcome: shadow ? 'deferred' : OUTCOME[verdict.decision], tool: e.tool, summary, reason: shadow ? `shadow, Jev would ${verdict.decision}: ${reason}` : reason, ms })
+      record($, { outcome: shadow ? 'deferred' : OUTCOME[verdict.decision], tool: e.tool, summary, reason: shadow ? `shadow, Jev would ${verdict.decision}: ${reason}` : reason, ms, model: result.model })
       if (shadow || verdict.decision === 'defer') {
         return handOff({ jev: { decision: blocklisted ? 'defer' : verdict.decision, ms, reason, blocklisted } })
       }

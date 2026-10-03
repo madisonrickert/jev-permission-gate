@@ -64,6 +64,7 @@ type Row = {
   nouls: Record<string, number>
   ms: number
   tokens: number
+  model: string
 }
 
 async function judge(variant: string, rep: number, c: Case): Promise<Row> {
@@ -99,6 +100,7 @@ async function judge(variant: string, rep: number, c: Case): Promise<Row> {
     nouls: Object.fromEntries(QUESTION_KEYS.map((k) => [k, parsed.answers[k].noul])),
     ms,
     tokens: parsed.usage?.input_tokens ?? 0,
+    model: parsed.model,
   }
 }
 
