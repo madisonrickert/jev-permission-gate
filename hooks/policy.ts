@@ -153,6 +153,12 @@ export function commandPrograms(command: string): string[] {
 // git settings whose value is a program git will run.
 const GIT_EXEC_CONFIG = /^(core\.(pager|sshcommand|fsmonitor|hookspath|editor|askpass|gitproxy)|diff\.[^=]*(external|textconv|command)|merge\.[^=]*driver|filter\.|alias\.|credential\.|gpg\.|sequence\.editor|uploadpack\.|receivepack\.|protocol\.|url\.|include\.|includeif\.|interactive\.difffilter|pager\.)/i
 
+/** Whether `arg` is `name` or an abbreviation git would accept for it (git takes any unambiguous prefix of a long option). */
+const opt = (arg: string, ...names: string[]) => {
+  const flag = arg.split('=')[0]!
+  return names.some((n) => flag === n || (n.startsWith('--') && flag.startsWith('--') && flag.length >= 3 && n.startsWith(flag)))
+}
+
 function riskyGit(args: readonly string[]): string | undefined {
   let i = 0
   while (i < args.length && args[i]!.startsWith('-')) {
@@ -164,6 +170,8 @@ function riskyGit(args: readonly string[]): string | undefined {
   const sub = args[i]
   const rest = args.slice(i + 1)
   const has = (re: RegExp) => rest.some((a) => re.test(a))
+  const hasOpt = (...names: string[]) => rest.some((a) => opt(a, ...names))
+  if (hasOpt('--force', '--no-verify')) return 'forced or unverified operation'
   switch (sub) {
     case 'push':
     case 'filter-branch':
@@ -171,23 +179,23 @@ function riskyGit(args: readonly string[]): string | undefined {
     case 'rebase':
       return 'git history or remote change'
     case 'reset':
-      return has(/^--(hard|merge|keep)$/) ? 'git history or remote change' : undefined
+      return hasOpt('--hard', '--merge', '--keep') ? 'git history or remote change' : undefined
     case 'clean':
-      return has(/^-[a-z]*f|^--force$/) ? 'discards untracked files' : undefined
+      return has(/^-[a-z]*f/) ? 'discards untracked files' : undefined
     case 'checkout':
-      return rest.includes('--') || rest.includes('.') || has(/^-f$|^--force$/) ? 'discards uncommitted changes' : undefined
+      return rest.includes('--') || rest.includes('.') || has(/^-f$/) || hasOpt('--discard-changes', '--overwrite-ignore') ? 'discards uncommitted changes' : undefined
     case 'restore':
-      return has(/^(-S|--staged)$/) && !has(/^(-W|--worktree)$/) ? undefined : 'discards uncommitted changes'
+      return (has(/^-S$/) || hasOpt('--staged')) && !(has(/^-W$/) || hasOpt('--worktree')) ? undefined : 'discards uncommitted changes'
     case 'stash':
       return /^(drop|clear)$/.test(rest[0] ?? '') ? 'discards stashed changes' : undefined
     case 'branch':
-      return has(/^(-D|--delete|-d|-M|--force|-f)$/) ? 'deletes or overwrites a branch' : undefined
+      return has(/^-[a-zA-Z]*[DdMf]/) || hasOpt('--delete', '--move') ? 'deletes or overwrites a branch' : undefined
     case 'tag':
-      return has(/^(-d|--delete|-f|--force)$/) ? 'deletes or overwrites a tag' : undefined
+      return has(/^-[a-zA-Z]*[df]/) || hasOpt('--delete') ? 'deletes or overwrites a tag' : undefined
     case 'reflog':
       return rest[0] === 'expire' || rest[0] === 'delete' ? 'discards recovery history' : undefined
     case 'gc':
-      return has(/^--prune/) ? 'discards recovery history' : undefined
+      return hasOpt('--prune') ? 'discards recovery history' : undefined
     case 'update-ref':
       return 'rewrites refs directly'
     case 'worktree':
@@ -195,13 +203,13 @@ function riskyGit(args: readonly string[]): string | undefined {
     case 'submodule':
       return rest[0] === 'foreach' ? 'runs a command in every submodule' : undefined
     case 'config':
-      return has(/^--(global|system)$/) ? 'global git configuration' : rest.some((a) => GIT_EXEC_CONFIG.test(a)) ? 'git setting that runs a program' : undefined
+      return hasOpt('--global', '--system') ? 'global git configuration' : rest.some((a) => GIT_EXEC_CONFIG.test(a)) ? 'git setting that runs a program' : undefined
     case 'grep':
       // -O / --open-files-in-pager (and its abbreviations) runs a program on the matches.
       return rest.some((a) => /^-[a-zA-Z]*O/.test(a) || (a.length > 3 && '--open-files-in-pager'.startsWith(a.split('=')[0]!))) ? 'git grep runs a pager program' : undefined
     case 'difftool':
     case 'mergetool':
-      return has(/^(-x|--extcmd|-t|--tool)/) ? 'runs an external tool' : undefined
+      return has(/^-[xt]/) || hasOpt('--extcmd', '--tool') ? 'runs an external tool' : undefined
     case 'remote':
       return /^(add|set-url|remove|rm)$/.test(rest[0] ?? '') ? 'changes a git remote' : undefined
     default:

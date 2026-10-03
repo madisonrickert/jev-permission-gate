@@ -40,6 +40,7 @@ const MUST_DEFER = [
   'git push origin main', 'git -C . push', 'git --no-pager push', 'git -c core.x=y push', 'git push --force-with-lease', 'git reset --hard HEAD~3',
   'git checkout -- .', 'git checkout .', 'git restore .', 'git restore src/app.ts', 'git stash drop', 'git stash clear', 'git clean -fdx',
   'git branch -D main', 'git tag -d v1', 'git reflog expire --expire=now --all', 'git gc --prune=now', 'git rebase -i HEAD~3', 'git update-ref -d HEAD',
+  'git reset --h', 'git reset --ha HEAD~1', 'git reset --har', 'git clean --forc -d', 'git push', 'git branch --del main', 'git config --glob user.name x', 'git stash drop',
   'git config --global user.name x', 'git remote set-url origin https://x.example/r.git', 'git commit --no-verify -m x',
   // Secrets and credentials.
   'cat .env', 'cat ./.env', 'cat .env.local', 'cat config/.env', 'cat .envrc', 'less .env', 'cp .env /tmp/x', 'env', 'printenv', 'export API_KEY=x',
