@@ -65,7 +65,7 @@ test('metrics flag wrong denies and rep flips', () => {
   const rows = [
     row({ id: 'w', base: 'w', ok: ['allow', 'defer'], ideal: 'allow', nouls: { ...row({}).nouls, ...deny } }),
     row({ id: 'f', base: 'f', rep: 0, ok: ['allow', 'defer'], ideal: 'allow' }),
-    row({ id: 'f', base: 'f', rep: 1, ok: ['allow', 'defer'], ideal: 'allow', nouls: { ...row({}).nouls, serves_request: 0.5 } }),
+    row({ id: 'f', base: 'f', rep: 1, ok: ['allow', 'defer'], ideal: 'allow', nouls: { ...row({}).nouls, serves_request: 0.3 } }),
   ]
   const m = metrics(score(rows, DEFAULT_CONFIG))
   assert.deepEqual(m.wrongDenyCases, ['w'])

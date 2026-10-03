@@ -12,12 +12,14 @@ export type Analysis = {
   invocations: string[][]
   /** Targets of output redirections (`> f`, `>> f`, `tee f` is handled by the caller). */
   writes: string[]
+  /** Environment assignments in front of a command, e.g. `PAGER=x git log` gives PAGER. */
+  assignments: string[]
   /** Reasons the command can't be judged statically. */
   problems: string[]
 }
 
 // Words that start a compound command or negate one; the program follows.
-const KEYWORDS = new Set(['if', 'then', 'else', 'elif', 'fi', 'do', 'done', 'while', 'until', 'for', 'in', 'case', 'esac', 'select', 'function', '!', '{', '}', '[[', ']]', 'coproc'])
+const KEYWORDS = new Set(['if', 'then', 'else', 'elif', 'fi', 'do', 'done', 'while', 'until', 'for', 'in', 'case', 'esac', 'select', '!', '{', '}', '[[', ']]', 'coproc'])
 
 // Wrappers that run the next word as a command, with the options that take an argument.
 const WRAPPERS: Record<string, readonly string[]> = {
@@ -57,7 +59,7 @@ type Token = { kind: 'word'; text: string; quoted: boolean } | { kind: 'op'; tex
 
 /** Analyze a shell command. `depth` bounds recursion into nested shells. */
 export function analyze(command: string, depth = 0): Analysis {
-  const out: Analysis = { programs: [], invocations: [], writes: [], problems: [] }
+  const out: Analysis = { programs: [], invocations: [], writes: [], assignments: [], problems: [] }
   if (depth > 4) {
     out.problems.push('shell nesting too deep')
     return out
@@ -74,6 +76,13 @@ export function analyze(command: string, depth = 0): Analysis {
     out.problems.push((e as Error).message)
     return out
   }
+
+  // `name() { …; }` or `function name`: a function can recurse or shadow a program, as a fork bomb does.
+  tokens.forEach((t, k) => {
+    const [a, b] = [tokens[k + 1], tokens[k + 2]]
+    if (t.kind === 'word' && ((a?.kind === 'op' && a.text === '(' && b?.kind === 'op' && b.text === ')') || (t.text === 'function' && !t.quoted))) out.problems.push('defines a shell function')
+  })
+  if (/\bfor\s*\(\(\s*[^;)]*;\s*;/.test(text)) out.problems.push('unbounded loop')
 
   // Split into simple commands at control operators.
   const segments: Token[][] = [[]]
@@ -107,6 +116,7 @@ function merge(into: Analysis, from: Analysis) {
   into.programs.push(...from.programs)
   into.invocations.push(...from.invocations)
   into.writes.push(...from.writes)
+  into.assignments.push(...from.assignments)
   into.problems.push(...from.problems)
 }
 
@@ -115,6 +125,10 @@ function walk(words: string[], out: Analysis, depth: number, heredoc?: string) {
   let i = 0
   for (;;) {
     while (i < words.length && (/^[A-Za-z_][A-Za-z0-9_]*(\[[^\]]*\])?\+?=/.test(words[i]!) || KEYWORDS.has(words[i]!))) {
+      const name = /^([A-Za-z_][A-Za-z0-9_]*)(\[[^\]]*\])?\+?=/.exec(words[i]!)?.[1]
+      if (name) out.assignments.push(name)
+      // `while true`, `while :`, `until false`: a loop with no way out.
+      if ((words[i] === 'while' && /^(true|:|1)$/.test(words[i + 1] ?? '')) || (words[i] === 'until' && words[i + 1] === 'false')) out.problems.push('unbounded loop')
       // `for x in a b c; do` : the words after `for` and `in` are data, not programs.
       if (words[i] === 'for' || words[i] === 'select' || words[i] === 'case') return
       i++

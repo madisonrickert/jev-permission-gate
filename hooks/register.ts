@@ -7,6 +7,7 @@ import {
   decide,
   DEFAULT_CONFIG,
   prefilter,
+  restrict,
   QUESTION_KEYS,
   QUESTIONS,
   type GateConfig,
@@ -321,11 +322,12 @@ export const register: Register = (on, options) => {
     const shadow = mode === 'shadow'
 
     const gate = prefilter(e.tool, e.input, config)
-    if (!gate.ok && !(shadow && config.tools.includes(e.tool))) {
-      record($, { outcome: 'skipped', tool: e.tool, summary, reason: gate.reason })
-      return handOff({ skippedBecause: gate.reason })
+    // Calls carrying a secret, or that can't be judged, never leave the machine.
+    if (!gate.action) {
+      record($, { outcome: 'skipped', tool: e.tool, summary, reason: gate.ok ? 'no action' : gate.reason })
+      return handOff({ skippedBecause: gate.ok ? 'no action' : gate.reason })
     }
-    const action = gate.ok ? gate.action : { tool: e.tool, input: e.input as JsonValue }
+    const action = gate.action
     const blocklisted = gate.ok ? undefined : gate.reason
 
     const apiKey = await loadApiKey($)
@@ -348,11 +350,11 @@ export const register: Register = (on, options) => {
     const cacheKey = JSON.stringify(state)
     const cached = shadow ? undefined : cache.get(cacheKey)
     if (cached) {
-      record($, { outcome: OUTCOME[cached.decision], tool: e.tool, summary, reason: `cached: ${cached.reason}`, ms: 0 })
-      if (cached.decision === 'defer') return handOff({ jev: { decision: 'defer', ms: 0, reason: `cached: ${cached.reason}` } })
-      return answer(cached, `${model} (cached)`, decided)
+      const verdict = restrict(cached, gate)
+      record($, { outcome: OUTCOME[verdict.decision], tool: e.tool, summary, reason: `cached: ${verdict.reason}`, ms: 0 })
+      if (verdict.decision === 'defer') return handOff({ jev: { decision: 'defer', ms: 0, reason: `cached: ${verdict.reason}` } })
+      return answer(verdict, `${model} (cached)`, decided)
     }
-
     const started = await $.clock.now()
     try {
       const result = await Promise.race([askJev($, apiKey, state, model), timeout($, config.timeoutMs)])
@@ -361,12 +363,14 @@ export const register: Register = (on, options) => {
         record($, { outcome: 'error', tool: e.tool, summary, reason: `timed out after ${config.timeoutMs}ms`, ms })
         return handOff({ skippedBecause: `Jev timed out after ${config.timeoutMs}ms` })
       }
-      const verdict = decide(result.answers, config)
-      if (!shadow) remember(cacheKey, verdict)
-      const reason = blocklisted ? `${verdict.reason} [blocklisted: ${blocklisted}]` : verdict.reason
+      const raw = decide(result.answers, config)
+      if (!shadow) remember(cacheKey, raw)
+      // A blocklisted call can be denied but never allowed.
+      const verdict = restrict(raw, gate)
+      const reason = verdict.reason
       record($, { outcome: shadow ? 'deferred' : OUTCOME[verdict.decision], tool: e.tool, summary, reason: shadow ? `shadow, Jev would ${verdict.decision}: ${reason}` : reason, ms, model: result.model })
       if (shadow || verdict.decision === 'defer') {
-        return handOff({ jev: { decision: blocklisted ? 'defer' : verdict.decision, ms, reason, blocklisted } })
+        return handOff({ jev: { decision: verdict.decision, ms, reason, blocklisted } })
       }
       if (loggingOn()) jevDecided.set(e.tool_use_id, { tool: e.tool, summary, jev: { decision: verdict.decision, ms, reason } })
       return answer(verdict, result.model, decided)

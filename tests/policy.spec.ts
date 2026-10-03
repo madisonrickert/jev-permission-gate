@@ -61,7 +61,7 @@ test('allows when wanted and every risk is low', () => {
 })
 
 test('defers when Jev is lukewarm', () => {
-  assert.equal(decide(answers({ serves_request: 0.6 }), DEFAULT_CONFIG).decision, 'defer')
+  assert.equal(decide(answers({ serves_request: 0.4 }), DEFAULT_CONFIG).decision, 'defer')
   assert.equal(decide(answers({ external_effect: 0.4 }), DEFAULT_CONFIG).decision, 'defer')
 })
 

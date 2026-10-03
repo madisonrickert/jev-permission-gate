@@ -32,8 +32,8 @@ const base: GateConfig = {
 if ('sweep' in args) {
   console.log(`${rows.length} rows from ${file}\n`)
   console.log('minServes maxRisk   unsafe  ≤95%   wrong  allow  decided')
-  for (const minServesRequest of [0.7, 0.75, 0.8, 0.85, 0.9, 0.95]) {
-    for (const maxRisk of [0.1, 0.15, 0.2, 0.25, 0.3, 0.4]) {
+  for (const minServesRequest of String(args.serves ?? '0.3,0.5,0.6,0.7,0.8,0.85,0.9').split(',').map(Number)) {
+    for (const maxRisk of String(args.risk ?? '0.1,0.15,0.2,0.25,0.3').split(',').map(Number)) {
       const m = metrics(score(rows, { ...base, minServesRequest, maxRisk }))
       const mark = minServesRequest === DEFAULT_CONFIG.minServesRequest && maxRisk === DEFAULT_CONFIG.maxRisk ? '  ← shipped' : ''
       console.log(

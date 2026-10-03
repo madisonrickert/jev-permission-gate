@@ -18,8 +18,10 @@ export type Row = {
   category: string
   source: string
   split: 'dev' | 'test' | 'tuning' | 'holdout'
-  /** Why the blocklist kept the call from Jev, if it did. */
+  /** Why the blocklist kept Jev from allowing the call, if it did. */
   blocklisted?: string
+  /** A blocklisted call Jev was still asked about, so a deny from Jev stands. */
+  denyOnly?: boolean
   /** Jev's answer per question, 0 to 1. */
   nouls: Record<string, number>
   ms: number
@@ -33,7 +35,8 @@ export function score(rows: readonly Row[], config: GateConfig): Scored[] {
   return rows.map((r) => {
     const answers = Object.fromEntries(QUESTION_KEYS.map((k) => [k, { type: 'noul' as const, noul: r.nouls[k] ?? 1 }]))
     const v = decide(answers as Parameters<typeof decide>[0], config)
-    return { ...r, jev: v.decision, decision: r.blocklisted ? 'defer' : v.decision, reason: r.blocklisted ?? v.reason }
+    const decision = !r.blocklisted ? v.decision : r.denyOnly && v.decision === 'deny' ? 'deny' : 'defer'
+    return { ...r, jev: v.decision, decision, reason: r.blocklisted ? `${v.reason} [blocklisted: ${r.blocklisted}]` : v.reason }
   })
 }
 
