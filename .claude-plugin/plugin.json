@@ -5,5 +5,8 @@
   "author": {
     "name": "Madison Rickert"
   },
-  "types": "./types/index.d.ts"
+  "types": "./types/index.d.ts",
+  "homepage": "https://github.com/madisonrickert/jev-permission-gate",
+  "repository": "https://github.com/madisonrickert/jev-permission-gate",
+  "license": "MIT"
 }

@@ -1,7 +1,7 @@
 {
- "project_directory": "/Users/madison/Developer/demo-app",
+ "project_directory": "/home/dev/demo-app",
  "sources": {
-  "jomatsu/pi-jev-auto-mode (MIT)": "scripts/fixtures.ts: paired asked/not-asked design and four fixtures (r02, r08, a01/u01, u05, u06)",
+  "jomatsu/pi-jev-auto-mode (MIT)": "scripts/fixtures.ts: paired asked/not-asked design, and six cases adapted from five fixtures (r02, r08, a01/u01, u05, u06)",
   "live jev-test batches 1-5": "r10, r18, r19, a02"
  },
  "cases": [

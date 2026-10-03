@@ -1,28 +1,50 @@
 # jev-permission-gate
 
-A Claude Code mod that puts [TypeSafe's Jev](https://docs.typesafe.ai/) in front of the auto mode classifier. In auto mode, for each tool call Claude Code would otherwise send to the classifier, Jev answers seven yes/no questions in one request and the mod decides:
+A [Claude Code](https://code.claude.com) mod that puts [TypeSafe's Jev](https://docs.typesafe.ai/) in front of the auto mode classifier. In auto mode, for each tool call Claude Code would otherwise send to its built-in classifier, Jev answers seven yes/no questions in one request and the mod decides:
 
 - **allow** when Jev is at least 85% sure the call serves your request and every risk check is at or below 25%. The built-in classifier doesn't run.
 - **deny** when the call is both risky and unrequested: some risk check at or above 80% and "serves your request" at or below 30%. Claude sees the reason.
 - **defer** everything else to the built-in classifier, unchanged.
 
-Commands matching a fixed blocklist (sudo, recursive `rm`, `git push`, credential files, infrastructure and database CLIs, and similar) never reach Jev and always go to the built-in classifier. Jev only sees your recent messages, recent messages from other sessions (kept in a separate `peer_requests` field), and the pending call, never tool output.
+## Results
+
+Measured head to head against Claude Code's built-in classifier in a live session, on identical tool calls (details below):
+
+- **2× faster where Jev decides.** The permission wait drops from a median of 329ms to 164ms.
+- **Matching judgment.** Jev's verdicts agreed with the built-in classifier's on every call it would have decided.
+- **Safe in testing.** Across 77 labeled cases, including 24 held out and written to probe subtle overreach, it made zero unsafe allows and zero wrong denials. Anything it isn't sure about goes to the built-in classifier.
+- **Cheap to defer.** The classifier's work overlaps Jev's request, so calls Jev hands off cost almost nothing extra at the median.
+
+Today Jev decides about half of the calls in a typical workload, which cut the average permission wait by 16% overall. Every point of decision rate raises that: at the 84% Jev reached on the eval set, the projected saving is about 40%. Raising that rate is the main lever for future work.
+
+## How it works
+
+Commands matching a fixed blocklist (`sudo`, recursive `rm`, `git push`, credential files, infrastructure and database CLIs, and similar) never reach Jev and always go to the built-in classifier. Program names are matched against the program each command segment runs, so a path like `/tmp/jev-eval` doesn't read as `eval`.
+
+Jev sees only your recent messages, recent messages from other Claude Code sessions (kept in a separate `peer_requests` field), the pending call, and the project directory. It never sees tool output, so text Claude has read can't argue for its own approval.
 
 If the key is missing, TypeSafe errors, or Jev takes longer than 1.5 seconds, the call goes to the built-in classifier.
+
+## Privacy
+
+Every call the gate judges sends your last three messages (up to 1,500 characters each), the pending command or URL, and your project path to TypeSafe's API. Read [TypeSafe's data handling](https://docs.typesafe.ai/models.md#data-handling) before using it with anything sensitive.
 
 ## Requirements
 
 - Claude Code 2.1.287 or later, with mods enabled for your account
-- `TYPESAFE_API_KEY` in your environment, or as a `TYPESAFE_API_KEY=...` line in a `.env` file beside this README (gitignored). Get a key from [console.typesafe.ai](https://console.typesafe.ai/keys).
+- A TypeSafe API key from [console.typesafe.ai](https://console.typesafe.ai/keys), set as `TYPESAFE_API_KEY` in your environment or as a `TYPESAFE_API_KEY=...` line in a `.env` file at the repo root (gitignored)
 - Optional: `TYPESAFE_DEFAULT_MODEL` to pin a version such as `jev-1.13.0` instead of `jev-latest`
+
+Jev bills input tokens only. Each check is about 550 tokens, a small fraction of a cent.
 
 ## Use
 
 ```bash
-claude --plugin-dir ~/Developer/jev-permission-gate
+git clone https://github.com/madisonrickert/jev-permission-gate.git
+claude --plugin-dir ./jev-permission-gate
 ```
 
-Inside the session, `/jev-gate` shows counts, Jev latency, and the last 15 decisions with their reasons. Every decision, including calls the gate passed through untouched, is also written to `logs/decisions.jsonl` (gitignored, last 1,000 lines).
+The gate only acts in auto mode. Inside the session, `/jev-gate` shows counts, Jev latency, and the last 15 decisions with their reasons. Every decision, including calls the gate passed through untouched, is also written to `logs/decisions.jsonl` (gitignored, last 1,000 lines).
 
 ## Tune
 
@@ -33,22 +55,28 @@ Thresholds, the tool list, and the timeout live in `DEFAULT_CONFIG` in `hooks/po
 `evals/cases.json` (53 labeled calls, used to pick wording and thresholds) and `evals/holdout.json` (24 calls, mostly subtle overreach, held out) run against the live API:
 
 ```bash
-node evals/run.ts                                  # all wording variants on the tuning set
+node evals/run.ts                                    # all wording variants on the tuning set
 node evals/run.ts --cases=holdout --variant=shipped  # the shipped wording on the held-out set
 ```
 
-Each run costs about 600 input tokens per case per variant per rep, a fraction of a cent. Per-call rows land in `evals/results/` (gitignored). Results on 2026-10-02 with `jev-1.13.0`, two reps each:
+Each run costs about 600 input tokens per case per variant per rep. Per-call rows land in `evals/results/` (gitignored). Results on 2026-10-02 with `jev-1.13.0`, two reps each:
 
 | Set | Unsafe allows | Wrong denials | Routine requested calls allowed |
 | - | - | - | - |
 | Tuning (53) | 0 | 0 | 84% |
 | Held out (24) | 0 | 0 | 67% |
 
-Every miss was a deferral to the built-in classifier. The tuning set's paired asked/not-asked design follows [jomatsu/pi-jev-auto-mode](https://github.com/jomatsu/pi-jev-auto-mode) (MIT), and five of its cases are adapted from that project's calibration fixtures.
+Every miss was a deferral to the built-in classifier. One person wrote the labels for both sets, so they test what that person thought to test.
 
-## Head-to-head with the built-in classifier
+## Head to head with the built-in classifier
 
-`gate.json` (gitignored) sets the gate's mode: `enforce` (the default), `shadow` (Jev only observes; the classifier decides every call), or `measure` (Jev is never asked; the classifier is timed alone). Each call's whole permission wait (call start to return, minus the tool's own run time) goes to `logs/compare.jsonl`, and `node evals/compare.ts --since=<ISO time>` summarizes it.
+A `gate.json` file at the repo root (gitignored) sets the gate's mode:
+
+- `enforce`, the default: act on Jev's verdicts.
+- `shadow`: Jev only observes, and the classifier decides every call.
+- `measure`: Jev is never asked, and the classifier is timed alone.
+
+Each call's whole permission wait (call start to return, minus the tool's own run time) goes to `logs/compare.jsonl`, and `node evals/compare.ts --since=<ISO time>` summarizes it.
 
 On 2026-10-02, the same 24 classifier-bound commands, one call per turn in a live session:
 
@@ -59,7 +87,9 @@ On 2026-10-02, the same 24 classifier-bound commands, one call per turn in a liv
 | …decided by Jev | 11 | 164ms | 245ms | 192ms |
 | …deferred to the classifier | 13 | 321ms | 535ms | 376ms |
 
-Jev halves the wait on calls it decides, and deferring costs little at the median because the classifier's work overlaps Jev's request. Overall the gate cut the mean permission wait by 55ms per call (16%). In shadow mode Jev and the classifier agreed on all 11 calls Jev would have decided.
+Deferring costs little at the median because the classifier's work appears to overlap Jev's request. The overall gain scales with how many calls Jev decides: at the 84% it reached on the tuning set, the projected saving is roughly 40%. This was one session and one workload of mostly routine commands.
+
+TypeSafe's API also appears to handle one request per account at a time, so parallel tool calls queue their checks at about 100ms each.
 
 ## Test
 
@@ -73,10 +103,21 @@ claude plugin validate .
 
 | File | Role |
 | - | - |
-| `hooks/register.ts` | Wiring: `tool.check`, permission-mode tracking, `/jev-gate` |
+| `hooks/register.ts` | Wiring: `tool.check`, permission-mode tracking, timing, `/jev-gate` |
 | `hooks/policy.ts` | Pure logic: blocklist, Jev questions, state, thresholds |
 | `hooks/typesafe.ts` | Typed request and response for `POST /v1/systemone` |
+| `types/index.d.ts` | Session state that survives a hot reload |
+| `evals/` | Labeled cases, the eval runner, and the head-to-head summary |
 
 ## Prior art
 
-Design ideas borrowed from [bouncer](https://github.com/michaeldstenner/bouncer) (unsure verdicts hand off to auto mode) and [io-auto-mode](https://github.com/simon-inkie/inkie-auto-mode) (keep assistant text out of the classifier's input). Both are MIT licensed. No code was copied.
+- [bouncer](https://github.com/michaeldstenner/bouncer): unsure verdicts hand off to auto mode.
+- [io-auto-mode](https://github.com/simon-inkie/inkie-auto-mode): keep assistant text out of the classifier's input.
+- [pi-warden](https://github.com/DevMortimer/pi-warden): the most thoroughly tested Jev gate, for the pi coding agent.
+- [pi-jev-auto-mode](https://github.com/jomatsu/pi-jev-auto-mode): the paired asked/not-asked eval design. Six eval cases are adapted from five of its calibration fixtures; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+All are MIT licensed. Apart from those six adapted cases, no code or data was copied.
+
+## License
+
+[MIT](LICENSE)
