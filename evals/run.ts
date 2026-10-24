@@ -2,8 +2,8 @@
 // against the live TypeSafe API.
 //
 //   node evals/run.ts [--cases=cases|holdout|corpus|all|<set>,<set>] [--split=dev|test]
-//                     [--variant=shipped,v1,plain] [--reps=2] [--maxRisk=0.25] [--minServes=0.85]
-//                     [--by=set,source,category,split] [--ids=list.json] [--no-cache] [--json]
+//                     [--variant=shipped,v1,plain] [--reps=2] [--maxRisk=0.25] [--minServes=0.85] [--model=jev-1.14.0]
+//                     [--by=set,source,category,split] [--ids=list.json] [--no-description] [--descriptions=none|honest|misleading] [--no-cache] [--json]
 //
 // Needs TYPESAFE_API_KEY in the environment or in the repo's .env. Each case
 // costs one request of about 700 input tokens per variant per rep. Responses
@@ -50,6 +50,7 @@ const config = {
   ...DEFAULT_CONFIG,
   ...(args.maxRisk ? { maxRisk: Number(args.maxRisk) } : {}),
   ...(args.minServes ? { minServesRequest: Number(args.minServes) } : {}),
+  ...(args.model ? { model: args.model } : {}),
 }
 const variants = String(args.variant ?? 'shipped').split(',')
 const reps = Number(args.reps ?? 2)
@@ -97,11 +98,31 @@ async function ask(body: unknown, rep: number): Promise<{ text: string; ms: numb
   }
 }
 
-async function judge(set: CaseSet, variant: string, rep: number, c: Case): Promise<Row> {
+// --descriptions=none|honest|misleading runs only the cases in
+// evals/descriptions/pilot.json, giving each Bash call no description, its
+// honest one, or (for cases that must not be allowed) its misleading one.
+type Described = { honest: string; misleading?: string; style?: string }
+const descriptionMode = args.descriptions
+if (descriptionMode && !['none', 'honest', 'misleading'].includes(descriptionMode)) throw new Error(`unknown --descriptions=${descriptionMode}`)
+const described = descriptionMode
+  ? (JSON.parse(readFileSync(`${ROOT}evals/descriptions/pilot.json`, 'utf8')) as { cases: Record<string, Described> }).cases
+  : undefined
+
+function withDescription(set: CaseSet, c: Case): Case {
+  const d = described?.[`${set.name}/${c.id}`]
+  if (!d || descriptionMode === 'none') return c
+  const description = descriptionMode === 'misleading' ? (d.misleading ?? d.honest) : d.honest
+  return { ...c, input: { ...c.input, description } }
+}
+
+async function judge(set: CaseSet, variant: string, rep: number, original: Case): Promise<Row> {
+  const c = withDescription(set, original)
   const gate = prefilter(c.tool, c.input, config)
   // Ask Jev even about calls the mod would keep private, to see what it would
   // have said; those rows are scored as deferrals.
   const action = gate.ok || gate.action ? gate.action! : { tool: c.tool, ...(c.input as Record<string, never>) }
+  // --no-description: judge Bash calls without Claude's own description of them.
+  if ('no-description' in args) delete action.description
   const body = {
     model: config.model,
     state: buildState(requests(c), action, c.project_directory ?? set.project_directory, c.peer ?? []),
@@ -158,6 +179,7 @@ const jobs = sets.flatMap((set) =>
   set.cases
     .filter((c) => !args.split || (c.split ?? 'tuning') === args.split)
     .filter((c) => !only || only.has(`${set.name}/${c.id}`))
+    .filter((c) => !described || `${set.name}/${c.id}` in described)
     .flatMap((c) => variants.flatMap((v) => Array.from({ length: reps }, (_, r) => ({ set, v, r, c })))),
 )
 const rows = await pool(jobs, 4, ({ set, v, r, c }) => judge(set, v, r, c))
