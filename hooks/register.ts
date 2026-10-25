@@ -13,6 +13,7 @@ import {
   type GateConfig,
   type QuestionKey,
   type Verdict,
+  withholdSecrets,
 } from './policy.ts'
 import { atom, read, update, type EngineInterface, type Register } from 'claude-code'
 import {
@@ -91,15 +92,28 @@ let configuredGateMode: GateMode = 'enforce'
 let gateMode: GateMode = 'enforce'
 let gateModeReadAt = -Infinity
 
+// Capture mode records, for each call that reaches the gate, everything needed
+// to replay it as an eval case: the full tool input, the recent transcript
+// (text and tool calls, never tool output), the state Jev saw, its answers,
+// and how the call ended. One file per call under captures/, on this machine
+// only, with inline secrets withheld. Off unless the capture setting or
+// {"capture": true} in gate.json turns it on.
+let configuredCapture = false
+let capture = false
+const CAPTURE_MESSAGES = 30
+const captures = new Map<string, Record<string, unknown>>()
+
 async function loadGateMode($: EngineInterface): Promise<GateMode> {
   const now = await $.clock.now()
   if (now - gateModeReadAt < 5000) return gateMode
   gateModeReadAt = now
   try {
-    const parsed = JSON.parse(await $.fs.read(`${await loadDataDir($)}/gate.json`)) as { mode?: unknown }
+    const parsed = JSON.parse(await $.fs.read(`${await loadDataDir($)}/gate.json`)) as { mode?: unknown; capture?: unknown }
     gateMode = asGateMode(parsed.mode) ?? configuredGateMode
+    capture = typeof parsed.capture === 'boolean' ? parsed.capture : configuredCapture
   } catch {
     gateMode = configuredGateMode
+    capture = configuredCapture
   }
   return gateMode
 }
@@ -212,6 +226,40 @@ async function rememberMode($: EngineInterface, mode: string | undefined) {
   await update($, modeAtom, () => mode)
 }
 
+async function startCapture($: EngineInterface, id: string, tool: string, input: unknown, mode: GateMode) {
+  const messages = (await $.session.messages())
+    .filter((m) => m.text.trim() || m.toolUses.length)
+    .slice(-CAPTURE_MESSAGES)
+    .map((m) => ({ role: m.role, text: m.text, tools: m.toolUses.map((u) => ({ tool: u.tool, input: u.input })) }))
+  const row: Record<string, unknown> = {
+    id,
+    at: new Date().toISOString(),
+    gate: mode,
+    project_directory: await $.session.cwd(),
+    tool,
+    input,
+    messages,
+    peer_requests: peerRequests,
+  }
+  captures.set(id, row)
+  if (captures.size > 50) captures.delete(captures.keys().next().value as string)
+  return row
+}
+
+function finishCapture($: EngineInterface, id: string, result: { deny?: unknown }) {
+  const row = captures.get(id)
+  if (!row) return
+  captures.delete(id)
+  row.outcome = result.deny !== undefined ? { decision: 'deny', reason: String(result.deny).slice(0, 500) } : { decision: 'allow' }
+  void (async () => {
+    const dir = await loadDataDir($)
+    const day = String(row.at).slice(0, 10)
+    await $.fs.write(`${dir}/captures/${day}/${id.replace(/[^\w-]/g, '_')}.json`, JSON.stringify(withholdSecrets(row), null, 2) + '\n')
+  })().catch(() => {
+    // Capturing must never affect a permission decision.
+  })
+}
+
 function percentile(values: readonly number[], p: number) {
   if (!values.length) return 0
   const sorted = [...values].sort((a, b) => a - b)
@@ -224,7 +272,9 @@ export const register: Register = (on, options) => {
   configuredModel = option('model')
   configuredGateMode = asGateMode(option('gate_mode')) ?? 'enforce'
   decisionLogs = options.decision_logs === true
+  configuredCapture = options.capture === true
   gateMode = configuredGateMode
+  capture = configuredCapture
 
   on('session.start', async ($, e, next) => {
     await $.command.register({
@@ -261,6 +311,7 @@ export const register: Register = (on, options) => {
     // runs in `measure` and `enforce` compare end to end.
     const calledAt = await $.clock.now()
     const result = await next(e)
+    finishCapture($, e.tool_use_id, result)
     const handoff = handoffs.get(e.tool_use_id)
     const decidedByJev = jevDecided.get(e.tool_use_id)
     if (!handoff && !decidedByJev) return result
@@ -318,6 +369,8 @@ export const register: Register = (on, options) => {
       return decided
     }
 
+    const captured = capture ? await startCapture($, e.tool_use_id, e.tool, e.input ?? {}, mode) : undefined
+
     if (mode === 'measure') {
       record($, { outcome: 'skipped', tool: e.tool, summary, reason: 'measure mode: classifier only' })
       return handOff({ skippedBecause: 'measure mode' })
@@ -325,6 +378,7 @@ export const register: Register = (on, options) => {
     const shadow = mode === 'shadow'
 
     const gate = prefilter(e.tool, e.input, config)
+    if (captured) captured.prefilter = gate.ok ? { ok: true } : { ok: false, reason: gate.reason }
     // Calls carrying a secret, or that can't be judged, never leave the machine.
     if (!gate.action) {
       record($, { outcome: 'skipped', tool: e.tool, summary, reason: gate.ok ? 'no action' : gate.reason })
@@ -348,12 +402,14 @@ export const register: Register = (on, options) => {
     const userRequests = messages.filter((m) => m.role === 'user' && m.text.trim()).map((m) => m.text)
     const cwd = await $.session.cwd()
     const state = buildState(userRequests, action, cwd, peerRequests)
+    if (captured) captured.state = state
 
     // Shadow mode skips the cache so every comparison times a real request.
     const cacheKey = JSON.stringify(state)
     const cached = shadow ? undefined : cache.get(cacheKey)
     if (cached) {
       const verdict = restrict(cached, gate)
+      if (captured) captured.jev = { model, cached: true, decision: verdict.decision, enforced: true }
       record($, { outcome: OUTCOME[verdict.decision], tool: e.tool, summary, reason: `cached: ${verdict.reason}`, ms: 0 })
       if (verdict.decision === 'defer') return handOff({ jev: { decision: 'defer', ms: 0, reason: `cached: ${verdict.reason}` } })
       return answer(verdict, `${model} (cached)`, decided)
@@ -367,6 +423,15 @@ export const register: Register = (on, options) => {
         return handOff({ skippedBecause: `Jev timed out after ${config.timeoutMs}ms` })
       }
       const raw = decide(result.answers, config)
+      if (captured) {
+        captured.jev = {
+          model: result.model,
+          ms,
+          answers: Object.fromEntries(Object.entries(result.answers).map(([k, a]) => [k, (a as { noul: number }).noul])),
+          decision: restrict(raw, gate).decision,
+          enforced: !shadow,
+        }
+      }
       if (!shadow) remember(cacheKey, raw)
       // A blocklisted call can be denied but never allowed.
       const verdict = restrict(raw, gate)

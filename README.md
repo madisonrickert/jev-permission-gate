@@ -36,6 +36,8 @@ Why these thresholds: on the dev split, the risk ceiling is what kept unsafe cal
 
 Every call Jev judges sends your last three messages (up to 1,500 characters each), the pending command or URL, and your project path to TypeSafe's API. Read [TypeSafe's data handling](https://docs.typesafe.ai/models.md#data-handling) before using it with anything sensitive.
 
+Inline secrets in your messages are replaced with `[secret withheld]` before they're sent.
+
 These never leave your machine: calls with an inline secret (API keys and tokens in common formats, private keys, JWTs, bearer headers, passwords in assignments or URLs), and commands that touch `.env` files, credential files, or credential folders. They go straight to the built-in classifier, in every gate mode. Pattern matching can't catch every secret, so treat this as a backstop, not a guarantee.
 
 The API key itself is a sensitive plugin setting: Claude Code masks it and keeps it in secure storage rather than `settings.json`. The gate sends it only to TypeSafe and never logs it.
@@ -66,6 +68,7 @@ Claude Code asks for the plugin's settings when you enable it:
 | Gate mode | `enforce` | `enforce` acts on Jev's verdicts. `shadow` only logs them while the built-in classifier decides. `measure` skips Jev and times the classifier. |
 | Jev model | `jev-1.13.0` | Pinned to the version the thresholds were tuned on. `jev-latest` follows new releases, which can shift answers. |
 | Decision logs | off | Write every decision to `~/.claude/jev-permission-gate/logs/`. Off by default because the logs record the commands the gate sees. |
+| Capture calls | off | Save each call the gate judges, with the recent conversation, for building eval cases. See [Capture](#capture). |
 
 Change the gate mode, model, and logging later in `/config`. If you installed before v0.1.2, check that the model reads `jev-1.13.0`: an older install may have saved `jev-latest`. Instead of the key setting, you can export `TYPESAFE_API_KEY`.
 
@@ -79,6 +82,10 @@ With decision logs on, or in shadow or measure mode, logs go to `~/.claude/jev-p
 - `compare.jsonl`: each call the built-in classifier decided, with its timing
 
 Each keeps its last 1,000 lines.
+
+### Capture
+
+Capture saves what an eval case needs from each call that reaches the gate: the full tool input, your last 30 messages and Claude's (with the tool calls it made but never their output), the state Jev saw, its answers, and whether the call ran. Turn it on with the setting, or with `"capture": true` in `gate.json`. Each call is one file under `~/.claude/jev-permission-gate/captures/<date>/`. The files stay on your machine and inline secrets are withheld, but they hold your conversation, so keep them out of a public repo.
 
 ## Evals
 

@@ -352,6 +352,26 @@ function unsafeText(input: unknown): string | undefined {
   return undefined
 }
 
+const INLINE_SECRET_ALL = INLINE_SECRET.map((re) => new RegExp(re.source, `${re.flags}g`))
+
+/** `text` with each inline secret in it replaced, so the rest can still be read. */
+export function withholdSecretsIn(text: string): string {
+  return INLINE_SECRET_ALL.reduce((t, re) => t.replace(re, '[secret withheld]'), text)
+}
+
+/**
+ * A copy of `value` for a local record: inline secrets are withheld, and each
+ * string longer than `max` is clipped.
+ */
+export function withholdSecrets(value: unknown, max = 4000, depth = 0): JsonValue {
+  if (typeof value === 'string') return clip(withholdSecretsIn(value), max)
+  if (typeof value === 'number' || typeof value === 'boolean' || value === null) return value
+  if (depth > 8) return '[nested too deep]'
+  if (Array.isArray(value)) return value.map((v) => withholdSecrets(v, max, depth + 1))
+  if (typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, withholdSecrets(v, max, depth + 1)]))
+  return null
+}
+
 /** Why a URL can't be fast-approved, if it can't. */
 export function riskyUrlReason(url: string): string | undefined {
   let parsed: URL
@@ -424,6 +444,8 @@ export function clip(text: string, max = 1500): string {
  * for and the pending call, never tool results or Claude's prose, so content
  * Claude read can't argue for its own approval.
  *
+ * Inline secrets in the messages are withheld, as they are from tool inputs.
+ *
  * `peer_requests` holds messages other sessions sent this one. They don't
  * appear in the transcript as user messages, and without them Jev scores a
  * call another session asked for as unrequested.
@@ -435,11 +457,11 @@ export function buildState(
   peerRequests: readonly string[] = [],
 ): JsonValue {
   const state: Record<string, JsonValue> = {
-    user_requests: userRequests.slice(-3).map((t) => clip(t)),
+    user_requests: userRequests.slice(-3).map((t) => clip(withholdSecretsIn(t))),
     tool_call: action,
     project_directory: projectDirectory,
   }
-  if (peerRequests.length) state.peer_requests = peerRequests.slice(-3).map((t) => clip(t))
+  if (peerRequests.length) state.peer_requests = peerRequests.slice(-3).map((t) => clip(withholdSecretsIn(t)))
   return state
 }
 
