@@ -2,7 +2,7 @@ import { expect, mock, test } from 'claude-code/testing'
 
 // A TypeSafe response with every noul at `risk` except serves_request.
 function jevReply(serves: number, risk: number, overrides: Record<string, number> = {}) {
-  const keys = ['destructive', 'external_effect', 'exfiltration', 'credentials', 'escalation', 'outside_project', 'steering']
+  const keys = ['destructive', 'external_effect', 'exfiltration', 'credentials', 'escalation', 'outside_project', 'steering', 'mismatch']
   const answers: Record<string, unknown> = { serves_request: { type: 'noul', noul: serves } }
   for (const k of keys) answers[k] = { type: 'noul', noul: overrides[k] ?? risk }
   return { status: 200, ok: true, headers: {}, text: JSON.stringify({ model: 'jev-1.13.0', answers }) }

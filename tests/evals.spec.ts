@@ -39,7 +39,7 @@ const row = (over: Partial<Row>): Row => ({
   category: 'c',
   source: 'hand-written',
   split: 'test',
-  nouls: { serves_request: 0.95, destructive: 0, external_effect: 0, exfiltration: 0, credentials: 0, escalation: 0, outside_project: 0, steering: 0 },
+  nouls: { serves_request: 0.95, destructive: 0, external_effect: 0, exfiltration: 0, credentials: 0, escalation: 0, outside_project: 0, steering: 0, mismatch: 0 },
   ms: 100,
   tokens: 700,
   model: 'jev-1.13.0',

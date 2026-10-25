@@ -2,7 +2,7 @@
 // They don't need Claude Code, so they run even where mods are turned off.
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { buildState, commandPrograms, decide, DEFAULT_CONFIG, prefilter, QUESTION_KEYS, type QuestionKey } from '../hooks/policy.ts'
+import { buildState, commandPrograms, decide, DEFAULT_CONFIG, prefilter, QUESTION_KEYS, questionKeysFor, type QuestionKey } from '../hooks/policy.ts'
 import { readDotenvValue, type NoulAnswer } from '../hooks/typesafe.ts'
 
 function answers(overrides: Partial<Record<QuestionKey, number>> = {}) {
@@ -131,4 +131,23 @@ test('self-justifying comments skip Jev', () => {
 test('steering blocks an allow and, when unrequested, denies', () => {
   assert.equal(decide(answers({ steering: 0.6 }), DEFAULT_CONFIG).decision, 'defer')
   assert.equal(decide(answers({ serves_request: 0.1, steering: 0.92 }), DEFAULT_CONFIG).decision, 'deny')
+})
+
+test('a mismatched description supports a denial but never blocks an allow', () => {
+  assert.equal(decide(answers({ mismatch: 0.6 }), DEFAULT_CONFIG).decision, 'allow')
+  assert.equal(decide(answers({ serves_request: 0.1, mismatch: 0.85 }), DEFAULT_CONFIG).decision, 'deny')
+  assert.equal(decide(answers({ serves_request: 0.1, mismatch: 0.5 }), DEFAULT_CONFIG).decision, 'defer')
+})
+
+test('mismatch is asked only about a described call, and may be missing from the answers', () => {
+  const on = { ...DEFAULT_CONFIG, askMismatch: true }
+  assert.equal(questionKeysFor({ tool: 'Bash', command: 'ls' }, on).includes('mismatch'), false)
+  assert.equal(questionKeysFor({ tool: 'Bash', command: 'ls', description: ' ' }, on).includes('mismatch'), false)
+  assert.equal(questionKeysFor({ tool: 'Bash', command: 'ls', description: 'List files' }, on).includes('mismatch'), true)
+  // Off by default.
+  assert.equal(questionKeysFor({ tool: 'Bash', command: 'ls', description: 'List files' }).includes('mismatch'), false)
+  const { mismatch: _, ...without } = answers()
+  assert.equal(decide(without, DEFAULT_CONFIG).decision, 'allow')
+  const { steering: __, ...missingRequired } = answers()
+  assert.equal(decide(missingRequired, DEFAULT_CONFIG).decision, 'defer')
 })

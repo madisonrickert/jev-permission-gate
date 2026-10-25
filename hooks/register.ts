@@ -8,9 +8,10 @@ import {
   DEFAULT_CONFIG,
   prefilter,
   restrict,
-  QUESTION_KEYS,
-  QUESTIONS,
+  questionKeysFor,
+  questionsFor,
   type GateConfig,
+  type QuestionKey,
   type Verdict,
 } from './policy.ts'
 import { atom, read, update, type EngineInterface, type Register } from 'claude-code'
@@ -19,6 +20,7 @@ import {
   readDotenvValue,
   SYSTEM_ONE_URL,
   type JsonValue,
+  type NoulQuestion,
   type SystemOneRequest,
 } from './typesafe.ts'
 
@@ -187,15 +189,16 @@ async function loadApiKey($: EngineInterface): Promise<string | undefined> {
   return apiKeyCache
 }
 
-async function askJev($: EngineInterface, apiKey: string, state: JsonValue, model: string) {
-  const body: SystemOneRequest<(typeof QUESTION_KEYS)[number]> = { model, state, questions: QUESTIONS }
+async function askJev($: EngineInterface, apiKey: string, state: JsonValue, action: Record<string, JsonValue>, model: string) {
+  const keys = questionKeysFor(action, config)
+  const body: SystemOneRequest<QuestionKey> = { model, state, questions: questionsFor(action, config) as Record<QuestionKey, NoulQuestion> }
   const res = await $.http.fetch(SYSTEM_ONE_URL, {
     method: 'POST',
     headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   })
   if (!res.ok) throw new Error(`TypeSafe HTTP ${res.status}: ${res.text.slice(0, 200)}`)
-  return parseNoulResponse(JSON.parse(res.text), QUESTION_KEYS)
+  return parseNoulResponse(JSON.parse(res.text), keys)
 }
 
 async function timeout($: EngineInterface, ms: number): Promise<'timeout'> {
@@ -357,7 +360,7 @@ export const register: Register = (on, options) => {
     }
     const started = await $.clock.now()
     try {
-      const result = await Promise.race([askJev($, apiKey, state, model), timeout($, config.timeoutMs)])
+      const result = await Promise.race([askJev($, apiKey, state, action, model), timeout($, config.timeoutMs)])
       const ms = (await $.clock.now()) - started
       if (result === 'timeout') {
         record($, { outcome: 'error', tool: e.tool, summary, reason: `timed out after ${config.timeoutMs}ms`, ms })

@@ -3,7 +3,7 @@
 //
 //   node evals/run.ts [--cases=cases|holdout|corpus|all|<set>,<set>] [--split=dev|test]
 //                     [--variant=shipped,v1,plain] [--reps=2] [--maxRisk=0.25] [--minServes=0.85] [--model=jev-1.14.0]
-//                     [--by=set,source,category,split] [--ids=list.json] [--no-description] [--descriptions=none|honest|misleading] [--no-cache] [--json]
+//                     [--by=set,source,category,split] [--ids=list.json] [--no-description] [--descriptions=none|honest|misleading] [--mismatch] [--no-cache] [--json]
 //
 // Needs TYPESAFE_API_KEY in the environment or in the repo's .env. Each case
 // costs one request of about 700 input tokens per variant per rep. Responses
@@ -14,7 +14,7 @@
 
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { buildState, DEFAULT_CONFIG, prefilter, QUESTION_KEYS, QUESTIONS, type QuestionKey } from '../hooks/policy.ts'
+import { buildState, DEFAULT_CONFIG, prefilter, questionKeysFor, QUESTIONS, type QuestionKey } from '../hooks/policy.ts'
 import { parseNoulResponse, readDotenvValue, SYSTEM_ONE_URL, type NoulQuestion } from '../hooks/typesafe.ts'
 import { loadSet, requests, resolveSets, validateSet, type Case, type CaseSet } from './lib/cases.ts'
 import { metrics, report, score, tableLegend, type Row } from './lib/score.ts'
@@ -51,6 +51,8 @@ const config = {
   ...(args.maxRisk ? { maxRisk: Number(args.maxRisk) } : {}),
   ...(args.minServes ? { minServesRequest: Number(args.minServes) } : {}),
   ...(args.model ? { model: args.model } : {}),
+  // --mismatch: ask the mismatch question, which ships turned off.
+  ...('mismatch' in args ? { askMismatch: true } : {}),
 }
 const variants = String(args.variant ?? 'shipped').split(',')
 const reps = Number(args.reps ?? 2)
@@ -64,12 +66,10 @@ if (problems.length) throw new Error(`invalid cases:\n  ${problems.join('\n  ')}
 const key = process.env.TYPESAFE_API_KEY ?? (existsSync(`${ROOT}.env`) ? readDotenvValue(readFileSync(`${ROOT}.env`, 'utf8'), 'TYPESAFE_API_KEY') : undefined)
 if (!key) throw new Error('no TYPESAFE_API_KEY in the environment or .env')
 
-function questionsFor(variant: string): Record<QuestionKey, NoulQuestion> {
+function variantQuestions(variant: string, keys: readonly QuestionKey[]): Partial<Record<QuestionKey, NoulQuestion>> {
   const overrides = VARIANTS[variant]
   if (!overrides) throw new Error(`unknown variant ${variant}`)
-  return Object.fromEntries(
-    QUESTION_KEYS.map((k) => [k, { ...QUESTIONS[k], instructions: overrides[k] ?? QUESTIONS[k].instructions }]),
-  ) as Record<QuestionKey, NoulQuestion>
+  return Object.fromEntries(keys.map((k) => [k, { ...QUESTIONS[k], instructions: overrides[k] ?? QUESTIONS[k].instructions }]))
 }
 
 async function ask(body: unknown, rep: number): Promise<{ text: string; ms: number }> {
@@ -123,10 +123,11 @@ async function judge(set: CaseSet, variant: string, rep: number, original: Case)
   const action = gate.ok || gate.action ? gate.action! : { tool: c.tool, ...(c.input as Record<string, never>) }
   // --no-description: judge Bash calls without Claude's own description of them.
   if ('no-description' in args) delete action.description
+  const keys = questionKeysFor(action, config)
   const body = {
     model: config.model,
     state: buildState(requests(c), action, c.project_directory ?? set.project_directory, c.peer ?? []),
-    questions: questionsFor(variant),
+    questions: variantQuestions(variant, keys),
   }
   let reply: { text: string; ms: number }
   try {
@@ -134,7 +135,7 @@ async function judge(set: CaseSet, variant: string, rep: number, original: Case)
   } catch (e) {
     throw new Error(`${set.name}/${c.id}: ${(e as Error).message}`)
   }
-  const parsed = parseNoulResponse(JSON.parse(reply.text), QUESTION_KEYS)
+  const parsed = parseNoulResponse(JSON.parse(reply.text), keys)
   return {
     set: set.name,
     variant,
@@ -148,7 +149,7 @@ async function judge(set: CaseSet, variant: string, rep: number, original: Case)
     split: c.split ?? (set.name === 'cases' ? 'tuning' : 'holdout'),
     blocklisted: gate.ok ? undefined : gate.reason,
     denyOnly: !gate.ok && gate.action !== undefined,
-    nouls: Object.fromEntries(QUESTION_KEYS.map((k) => [k, parsed.answers[k].noul])),
+    nouls: Object.fromEntries(keys.map((k) => [k, parsed.answers[k].noul])),
     ms: reply.ms,
     tokens: parsed.usage?.input_tokens ?? 0,
     model: parsed.model,

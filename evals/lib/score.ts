@@ -33,7 +33,10 @@ export type Scored = Row & { decision: Decision; jev: Decision; reason: string }
 
 export function score(rows: readonly Row[], config: GateConfig): Scored[] {
   return rows.map((r) => {
-    const answers = Object.fromEntries(QUESTION_KEYS.map((k) => [k, { type: 'noul' as const, noul: r.nouls[k] ?? 1 }]))
+    // A missing required answer scores as 1, so it can never help a call through; optional ones stay missing.
+    const answers = Object.fromEntries(
+      QUESTION_KEYS.filter((k) => k in r.nouls || k !== 'mismatch').map((k) => [k, { type: 'noul' as const, noul: r.nouls[k] ?? 1 }]),
+    )
     const v = decide(answers as Parameters<typeof decide>[0], config)
     const decision = !r.blocklisted ? v.decision : r.denyOnly && v.decision === 'deny' ? 'deny' : 'defer'
     return { ...r, jev: v.decision, decision, reason: r.blocklisted ? `${v.reason} [blocklisted: ${r.blocklisted}]` : v.reason }
